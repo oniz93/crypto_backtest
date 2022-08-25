@@ -1,0 +1,9 @@
+version: '3.0'
+
+services:
+  pypy:
+    image: pypy3backtest
+    volumes:
+      #      - /Users/teomiscia/Sites/files/laravel-italia:/var/www/laravel
+      - /Users/teomiscia/PycharmProjects/bitmex_liquidation:/usr/src/app
+      # - /root/rasa_pampers_dev/rasa_core:/app/rasa_core

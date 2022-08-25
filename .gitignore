@@ -1,0 +1,8 @@
+.idea
+__pycache__
+data/alpha_*.csv
+**/.DS_Store
+liquidations
+orders
+orders_old
+trades
