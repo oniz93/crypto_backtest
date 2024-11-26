@@ -77,7 +77,7 @@ class DataLoader:
             # Store the support and resistance levels
             self.support_resistance[tf] = data[['support', 'resistance']]
             # Optional: Save to CSV files
-            data[['support', 'resistance']].to_csv(f"suppres/support_resistance_{tf}.csv")
+            # data[['support', 'resistance']].to_csv(f"suppres/support_resistance_{tf}.csv")
 
     def calculate_indicator(self, indicator_name: str, params: Dict[str, Any], timeframe: str) -> pd.DataFrame:
         """

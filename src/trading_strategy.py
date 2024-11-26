@@ -144,7 +144,7 @@ class TradingStrategy:
             for indicator_name, tf_dict in self.data_loader.indicators.items():
                 for tf, df in tf_dict.items():
                     # Resample or reindex to base timeframe if necessary
-                    df = df.reindex(indicators_df.index, method='ffill')
+                    df = df.reindex(indicators_df.index, method='fill')
                     indicators_df = indicators_df.join(df, rsuffix=f'_{indicator_name}_{tf}')
         else:
             print("Indicators not found in data_loader.")
