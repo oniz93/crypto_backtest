@@ -16,16 +16,16 @@ from src.utils import (
 )
 import numexpr as ne
 
-# Import machine learning libraries
-from sklearn.linear_model import LogisticRegression
-
-
-# You can replace LogisticRegression with other models if desired
-
 class TradingStrategy:
-    def __init__(self, data_loader, config):
+    def __init__(self, data_loader, config, model_buy, model_sell):
         self.data_loader = data_loader
         self.config = config
+
+        # Models and thresholds provided externally
+        self.model_buy = model_buy
+        self.model_sell = model_sell
+        self.threshold_buy = config.get('threshold_buy', 0.6)
+        self.threshold_sell = config.get('threshold_sell', 0.6)
 
         # Initialize attributes (from your existing code)
         self.last_support = 0
@@ -110,30 +110,13 @@ class TradingStrategy:
         self.current_time = 0
         self.last_price = 0
 
-        # New attributes for the regression models
-        self.model_buy = None
-        self.model_sell = None
-        self.threshold_buy = 0.6  # You can adjust the threshold
-        self.threshold_sell = 0.6
-        self.features = None
-        self.labels_buy = None
-        self.labels_sell = None
-        self.X_train = None
-        self.y_train_buy = None
-        self.y_train_sell = None
-        self.X_test = None
-        self.y_test_buy = None
-        self.y_test_sell = None
+        # Prepare features data (indicators)
+        self.features = self.prepare_features()
 
-        # Prepare data and train models
-        self.prepare_data()
-
-    def prepare_data(self):
+    def prepare_features(self):
         """
-        Prepares the dataset by merging indicators and creating labels for training.
+        Prepares the features (indicators) data.
         """
-        # Assuming self.data_loader.tick_data is a dictionary of DataFrames keyed by timeframe
-        # For simplicity, we'll use the base timeframe data and merge indicators
         base_tf = self.data_loader.base_timeframe
         price_data = self.data_loader.tick_data[base_tf].copy()
 
@@ -144,53 +127,20 @@ class TradingStrategy:
             for indicator_name, tf_dict in self.data_loader.indicators.items():
                 for tf, df in tf_dict.items():
                     # Resample or reindex to base timeframe if necessary
-                    df = df.reindex(indicators_df.index, method='fill')
+                    df = df.reindex(indicators_df.index, method='ffill')
                     indicators_df = indicators_df.join(df, rsuffix=f'_{indicator_name}_{tf}')
         else:
             print("Indicators not found in data_loader.")
-            # You might want to handle this case differently
+            # Handle this case appropriately
 
         # Drop rows with NaN values
         indicators_df.dropna(inplace=True)
 
-        # Create labels for buy (1) and hold/sell (0)
-        indicators_df['future_return'] = indicators_df['close'].shift(-1) / indicators_df['close'] - 1
-        indicators_df['buy_signal'] = np.where(indicators_df['future_return'] > 0, 1, 0)
-        indicators_df['sell_signal'] = np.where(indicators_df['future_return'] < 0, 1, 0)
-
-        # Split features and labels
-        self.features = indicators_df.drop(columns=[
-            'open', 'high', 'low', 'close', 'volume',
-            'future_return', 'buy_signal', 'sell_signal'
+        # Exclude price columns and other non-feature columns
+        features = indicators_df.drop(columns=[
+            'open', 'high', 'low', 'close', 'volume'
         ])
-        self.labels_buy = indicators_df['buy_signal']
-        self.labels_sell = indicators_df['sell_signal']
-
-        # Split into training and testing sets (e.g., 80% training, 20% testing)
-        split_index = int(len(indicators_df) * 0.8)
-        self.X_train = self.features.iloc[:split_index]
-        self.y_train_buy = self.labels_buy.iloc[:split_index]
-        self.y_train_sell = self.labels_sell.iloc[:split_index]
-        self.X_test = self.features.iloc[split_index:]
-        self.y_test_buy = self.labels_buy.iloc[split_index:]
-        self.y_test_sell = self.labels_sell.iloc[split_index:]
-
-        # Train the models
-        self.train_models()
-
-    def train_models(self):
-        """
-        Trains the regression models for buying and selling.
-        """
-        # For buying
-        self.model_buy = LogisticRegression(max_iter=1000)
-        self.model_buy.fit(self.X_train, self.y_train_buy)
-
-        # For selling
-        self.model_sell = LogisticRegression(max_iter=1000)
-        self.model_sell.fit(self.X_train, self.y_train_sell)
-
-        # Optionally, evaluate the models here and adjust thresholds
+        return features
 
     def analyze_buy(self, indicator_values):
         """

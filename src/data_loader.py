@@ -26,6 +26,15 @@ class DataLoader:
         tick_data_1m = pd.read_parquet(
             os.path.join(self.data_folder, 'BTCUSDT-tick-1min.parquet'),
         )
+        # Ensure 'timestamp' is in datetime format
+        if 'timestamp' in tick_data_1m.columns:
+            tick_data_1m['timestamp'] = pd.to_datetime(tick_data_1m['timestamp'])
+        else:
+            raise ValueError("The 'timestamp' column is not present in the data.")
+        # Set 'timestamp' as the index
+        tick_data_1m.set_index('timestamp', inplace=True)
+        # Sort the index
+        tick_data_1m.sort_index(inplace=True)
         # Store base timeframe data
         self.tick_data[self.base_timeframe] = tick_data_1m
 
@@ -89,111 +98,114 @@ class DataLoader:
             return self.cache[cache_key]
         if indicator_name == 'sma':
             length = int(params['length'])
-            data[f'SMA_{length}'] = ta.sma(data['close'], length=length)
+            data[f'SMA_{length}'] = ta.sma(data['close'], length=length).astype(float)
             result = data[[f'SMA_{length}']].dropna()
         elif indicator_name == 'ema':
             length = int(params['length'])
-            data[f'EMA_{length}'] = ta.ema(data['close'], length=length)
+            data[f'EMA_{length}'] = ta.ema(data['close'], length=length).astype(float)
             result = data[[f'EMA_{length}']].dropna()
         elif indicator_name == 'rsi':
             length = int(params['length'])
-            data[f'RSI_{length}'] = ta.rsi(data['close'], length=length)
+            data[f'RSI_{length}'] = ta.rsi(data['close'], length=length).astype(float)
             result = data[[f'RSI_{length}']].dropna()
         elif indicator_name == 'macd':
             fast = int(params['fast'])
             slow = int(params['slow'])
             signal = int(params['signal'])
-            macd_df = ta.macd(data['close'], fast=fast, slow=slow, signal=signal)
+            macd_df = ta.macd(data['close'], fast=fast, slow=slow, signal=signal).astype(float)
             result = macd_df.dropna()
         elif indicator_name == 'bbands':
             length = int(params['length'])
             std_dev = float(params['std_dev'])
-            bbands_df = ta.bbands(data['close'], length=length, std=std_dev)
+            bbands_df = ta.bbands(data['close'], length=length, std=std_dev).astype(float)
             result = bbands_df.dropna()
         elif indicator_name == 'atr':
             length = int(params['length'])
-            data[f'ATR_{length}'] = ta.atr(data['high'], data['low'], data['close'], length=length)
+            data[f'ATR_{length}'] = ta.atr(data['high'], data['low'], data['close'], length=length).astype(float)
             result = data[[f'ATR_{length}']].dropna()
         elif indicator_name == 'stoch':
             k = int(params['k'])
             d = int(params['d'])
-            stoch_df = ta.stoch(data['high'], data['low'], data['close'], k=k, d=d)
+            stoch_df = ta.stoch(data['high'], data['low'], data['close'], k=k, d=d).astype(float)
             result = stoch_df.dropna()
         elif indicator_name == 'cci':
             length = int(params['length'])
-            data[f'CCI_{length}'] = ta.cci(data['high'], data['low'], data['close'], length=length)
+            data[f'CCI_{length}'] = ta.cci(data['high'], data['low'], data['close'], length=length).astype(float)
             result = data[[f'CCI_{length}']].dropna()
         elif indicator_name == 'adx':
             length = int(params['length'])
-            data[f'ADX_{length}'] = ta.adx(data['high'], data['low'], data['close'], length=length)
+            adx_df = ta.adx(data['high'], data['low'], data['close'], length=length).astype(float)
+            data[f'ADX_{length}'] = adx_df[f'ADX_{length}']
             result = data[[f'ADX_{length}']].dropna()
         elif indicator_name == 'cmf':
             length = int(params['length'])
-            data[f'CMF_{length}'] = ta.cmf(data['high'], data['low'], data['close'], data['volume'], length=length)
+            data[f'CMF_{length}'] = ta.cmf(data['high'], data['low'], data['close'], data['volume'], length=length).astype(float)
             result = data[[f'CMF_{length}']].dropna()
         elif indicator_name == 'mfi':
             length = int(params['length'])
-            data[f'MFI_{length}'] = ta.mfi(data['high'], data['low'], data['close'], data['volume'], length=length)
+            data[f'MFI_{length}'] = ta.mfi(data['high'], data['low'], data['close'], data['volume'], length=length).astype(float)
             result = data[[f'MFI_{length}']].dropna()
         elif indicator_name == 'roc':
             length = int(params['length'])
-            data[f'ROC_{length}'] = ta.roc(data['close'], length=length)
+            data[f'ROC_{length}'] = ta.roc(data['close'], length=length).astype(float)
             result = data[[f'ROC_{length}']].dropna()
         elif indicator_name == 'willr':
             length = int(params['length'])
-            data[f'WILLR_{length}'] = ta.willr(data['high'], data['low'], data['close'], length=length)
+            data[f'WILLR_{length}'] = ta.willr(data['high'], data['low'], data['close'], length=length).astype(float)
             result = data[[f'WILLR_{length}']].dropna()
         elif indicator_name == 'psar':
             acceleration = float(params['acceleration'])
             max_acceleration = float(params['max_acceleration'])
-            data['PSAR'] = ta.psar(data['high'], data['low'], acceleration=acceleration, maximum=max_acceleration)
-            result = data[['PSAR']].dropna()
+            psar_df = ta.psar(data['high'], data['low'], close=data['close'], af=acceleration, max_af=max_acceleration).astype(float)
+            data = data.join(psar_df)
+            result = data.dropna()
         elif indicator_name == 'ichimoku':
             tenkan = int(params['tenkan'])
             kijun = int(params['kijun'])
             senkou = int(params['senkou'])
-            ichimoku_df = ta.ichimoku(data['high'], data['low'], tenkan=tenkan, kijun=kijun, senkou=senkou)
-            result = ichimoku_df.dropna()
+            ichimoku_df, _ = ta.ichimoku(data['high'], data['low'], close=data['close'], tenkan=tenkan, kijun=kijun, senkou=senkou)
+            data = data.join(ichimoku_df.astype(float))
+            result = data.dropna()
         elif indicator_name == 'keltner':
             length = int(params['length'])
             multiplier = float(params['multiplier'])
-            keltner_df = ta.kc(data['high'], data['low'], data['close'], length=length, scalar=multiplier)
+            keltner_df = ta.kc(data['high'], data['low'], data['close'], length=length, scalar=multiplier).astype(float)
             result = keltner_df.dropna()
         elif indicator_name == 'donchian':
             lower_length = int(params['lower_length'])
             upper_length = int(params['upper_length'])
-            donchian_df = ta.donchian(data['high'], data['low'], lower_length=lower_length, upper_length=upper_length)
+            donchian_df = ta.donchian(data['high'], data['low'], lower_length=lower_length, upper_length=upper_length).astype(float)
             result = donchian_df.dropna()
         elif indicator_name == 'emv':
             length = int(params['length'])
-            emv_df = ta.eom(data['high'], data['low'], data['volume'], length=length)
+            emv_df = ta.eom(data['high'], data['low'], close=data['close'], volume=data['volume'], length=length).astype(float)
             result = emv_df.dropna()
         elif indicator_name == 'force':
             length = int(params['length'])
-            data[f'FORCE_{length}'] = ta.efi(data['close'], data['volume'], length=length)
+            data[f'FORCE_{length}'] = ta.efi(data['close'], data['volume'], length=length).astype(float)
             result = data[[f'FORCE_{length}']].dropna()
         elif indicator_name == 'uo':
             short = int(params['short'])
             medium = int(params['medium'])
             long = int(params['long'])
-            data['UO'] = ta.uo(data['high'], data['low'], data['close'], fast=short, medium=medium, slow=long)
+            data['UO'] = ta.uo(data['high'], data['low'], data['close'], fast=short, medium=medium, slow=long).astype(float)
             result = data[['UO']].dropna()
         elif indicator_name == 'volatility':
             length = int(params['length'])
-            data[f'STDDEV_{length}'] = ta.stdev(data['close'], length=length)
+            data[f'STDDEV_{length}'] = ta.stdev(data['close'], length=length).astype(float)
             result = data[[f'STDDEV_{length}']].dropna()
         elif indicator_name == 'dpo':
             length = int(params['length'])
-            data['DPO'] = ta.dpo(data['close'], length=length)
+            data['DPO'] = ta.dpo(data['close'], length=length).astype(float)
             result = data[['DPO']].dropna()
         elif indicator_name == 'trix':
             length = int(params['length'])
-            data['TRIX'] = ta.trix(data['close'], length=length)
+            data['TRIX'] = ta.trix(data['close'], length=length).astype(float)
             result = data[['TRIX']].dropna()
         elif indicator_name == 'chaikin_osc':
             fast = int(params['fast'])
             slow = int(params['slow'])
-            data['Chaikin_Osc'] = ta.cmf(data['high'], data['low'], data['close'], data['volume'], fast=fast, slow=slow)
+            data['Chaikin_Osc'] = ta.adosc(data['high'], data['low'], data['close'], data['volume'], fast=fast, slow=slow).astype(float)
             result = data[['Chaikin_Osc']].dropna()
         else:
             raise ValueError(f"Indicator {indicator_name} is not implemented.")

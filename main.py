@@ -10,26 +10,11 @@ def main():
     # Load data
     data_loader = DataLoader()
     data_loader.import_ticks()
-
-    # Set up initial configuration
-    config = {
-        'initial_balance': 100000000,
-        'short_long': 'l',
-        # Other configuration parameters can be set here
-    }
-
-    # Create trading strategy instance
-    strategy = TradingStrategy(data_loader, config)
-
-    # Run simulation
-    simulation = Simulation(strategy)
-    result = simulation.run()
-    print(f"Simulation result: {result}")
+    data_loader.resample_data()
 
     # Run genetic optimization
-    optimizer = GeneticOptimizer(strategy, data_loader)
-    optimizer.run()
-
+    optimizer = GeneticOptimizer(TradingStrategy, data_loader)
+    optimizer.test_individual()
 
 if __name__ == '__main__':
     main()
