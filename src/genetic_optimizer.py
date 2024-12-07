@@ -11,7 +11,8 @@ class GeneticOptimizer:
         self.indicator_cache = {}
         self.indicators = self.define_indicators()
         self.timeframes = [
-            '1T', '5T', '15T', '30T', '45T', '1H', '2H', '4H', '8H', '12H', '1D'
+            # '1T', '5T', '15T', '30T', '45T', '1H', '2H', '4H', '8H', '12H', '1D'
+            '1T', '5T', '15T', '30T',  '1H', '4H', '1D'
         ]
         # Define model parameters and their ranges
         self.model_params = {
@@ -35,23 +36,24 @@ class GeneticOptimizer:
             'bbands': {'length': (5, 50), 'std_dev': (1.0, 3.0)},
             'atr': {'length': (5, 50)},
             'stoch': {'k': (5, 20), 'd': (3, 10)},
-            'cci': {'length': (5, 50)},
+            # 'cci': {'length': (5, 50)},
             'adx': {'length': (5, 50)},
-            'cmf': {'length': (5, 50)},
-            'mfi': {'length': (5, 30)},
-            'roc': {'length': (5, 50)},
-            'willr': {'length': (5, 30)},
-            'psar': {'acceleration': (0.01, 0.1), 'max_acceleration': (0.1, 0.5)},
+            # 'cmf': {'length': (5, 50)},
+            # 'mfi': {'length': (5, 30)},
+            # 'roc': {'length': (5, 50)},
+            # 'willr': {'length': (5, 30)},
+            # 'psar': {'acceleration': (0.01, 0.1), 'max_acceleration': (0.1, 0.5)},
             'ichimoku': {'tenkan': (5, 20), 'kijun': (20, 60), 'senkou': (40, 100)},
-            'keltner': {'length': (5, 50), 'multiplier': (1.0, 3.0)},
-            'donchian': {'lower_length': (5, 50), 'upper_length': (5, 50)},
-            'emv': {'length': (5, 20)},
-            'force': {'length': (1, 20)},
-            'uo': {'short': (5, 7), 'medium': (8, 14), 'long': (15, 28)},
-            'volatility': {'length': (5, 50)},
-            'dpo': {'length': (5, 50)},
-            'trix': {'length': (5, 50)},
-            'chaikin_osc': {'fast': (3, 10), 'slow': (10, 20)}
+            # 'keltner': {'length': (5, 50), 'multiplier': (1.0, 3.0)},
+            # 'donchian': {'lower_length': (5, 50), 'upper_length': (5, 50)},
+            # 'emv': {'length': (5, 20)},
+            # 'force': {'length': (1, 20)},
+            # 'uo': {'short': (5, 7), 'medium': (8, 14), 'long': (15, 28)},
+            # 'volatility': {'length': (5, 50)},
+            # 'dpo': {'length': (5, 50)},
+            # 'trix': {'length': (5, 50)},
+            # 'chaikin_osc': {'fast': (3, 10), 'slow': (10, 20)},
+            'vwap': {},
             # Indicators without parameters are not included
         }
 
@@ -180,8 +182,8 @@ class GeneticOptimizer:
         # Merge the indicators into one DataFrame
         for indicator_name, tf_dict in indicators.items():
             for tf, df in tf_dict.items():
-                df = df.reindex(features_df.index, method='fill')
-                features_df = features_df.join(df, rsuffix=f'_{indicator_name}_{tf}')
+                df = df.reindex(features_df.index, method='bfill').add_suffix(f'_{indicator_name}_{tf}')
+                features_df = features_df.join(df)
 
         # Drop rows with NaN values
         features_df.dropna(inplace=True)

@@ -200,13 +200,16 @@ class DataLoader:
             result = data[['DPO']].dropna()
         elif indicator_name == 'trix':
             length = int(params['length'])
-            data['TRIX'] = ta.trix(data['close'], length=length).astype(float)
+            data['TRIX'] = ta.trix(data['close'], length=length).iloc[:, 0].astype(float)
             result = data[['TRIX']].dropna()
         elif indicator_name == 'chaikin_osc':
             fast = int(params['fast'])
             slow = int(params['slow'])
             data['Chaikin_Osc'] = ta.adosc(data['high'], data['low'], data['close'], data['volume'], fast=fast, slow=slow).astype(float)
             result = data[['Chaikin_Osc']].dropna()
+        elif indicator_name == 'vwap':
+            data['VWAP'] = ta.vwap(data['high'], data['low'], data['close'], data['volume']).astype(float)
+            result = data[['VWAP']].dropna()
         else:
             raise ValueError(f"Indicator {indicator_name} is not implemented.")
         self.cache[cache_key] = result
