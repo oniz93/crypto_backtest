@@ -10,16 +10,21 @@ import json
 
 from datetime import datetime, timedelta, timezone
 
+from pandas import Timestamp
+
+from src.data_loader import DataLoader
 from src.utils import (
     sat_to_usd, usd_to_sat, round_to_100, get_next_rebuy_pct,
     protected_div, timestamp_to_datetime
 )
+from src.config_loader import Config
 import numexpr as ne
 
 class TradingStrategy:
-    def __init__(self, data_loader, config, model_buy, model_sell):
+    def __init__(self, data_loader: DataLoader, config, model_buy, model_sell):
         self.data_loader = data_loader
         self.config = config
+        self.cl = Config()
 
         # Models and thresholds provided externally
         self.model_buy = model_buy
@@ -77,13 +82,14 @@ class TradingStrategy:
         self.rand_number = random.randint(1, 1234567890)
 
         # Load data (from your existing code)
-        self.calc_sr = self.data_loader.calc_sr
+        #self.calc_sr = self.data_loader.calc_sr
 
 
         # Trades data (from your existing code)
         self.trades = {'price': [], 'timestamp': []}
         self.id_trade = -1
         self.current_time = 0
+        self.current_timestamp = 0
         self.last_price = 0
 
         # Prepare features data (indicators)
@@ -164,9 +170,8 @@ class TradingStrategy:
                 try:
                     self.get_open_positions()
                     # Prepare current indicator values
-                    current_time_dt = timestamp_to_datetime(self.current_time)
-                    if current_time_dt in self.features.index:
-                        indicator_values = self.features.loc[current_time_dt].values
+                    if self.current_timestamp in self.features.index:
+                        indicator_values = self.features.loc[self.current_timestamp].values
                         # Use analyze_buy and analyze_sell methods
                         buy_prob = self.analyze_buy(indicator_values)
                         sell_prob = self.analyze_sell(indicator_values)
@@ -193,10 +198,9 @@ class TradingStrategy:
         self.id_trade += 1
         if self.id_trade == 0:
             month_str = str(self.month).zfill(2)
-            trades_file = f"data/BTCUSDT-trades-slim-2022-{month_str}.csv"
+            trades_file = f"trades_history/BTCUSDT-trades-aggregated-2021-{month_str}.parquet"
             if os.path.exists(trades_file):
-                columns = ['id', 'price', 'timestamp']
-                trades_df = pd.read_csv(trades_file, names=columns, index_col='id')
+                trades_df = pd.read_parquet(trades_file)
                 self.trades['price'] = trades_df['price'].tolist()
                 self.trades['timestamp'] = trades_df['timestamp'].tolist()
             else:
@@ -204,12 +208,13 @@ class TradingStrategy:
                 return
         try:
             self.last_price = self.trades['price'][self.id_trade]
-            self.current_time = self.trades['timestamp'][self.id_trade]
+            self.current_timestamp = self.trades['timestamp'][self.id_trade]
+            self.current_time = int(self.trades['timestamp'][self.id_trade].timestamp())
         except IndexError:
             # End of trades for current month, try next month
             self.month += 1
             month_str = str(self.month).zfill(2)
-            trades_file = f"data/BTCUSDT-trades-slim-2022-{month_str}.csv"
+            trades_file = f"data/BTCUSDT-trades-aggregated-2023-{month_str}.csv"
             if os.path.exists(trades_file):
                 columns = ['id', 'price', 'timestamp']
                 trades_df = pd.read_csv(trades_file, names=columns, index_col='id')
