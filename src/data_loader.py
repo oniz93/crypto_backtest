@@ -1,10 +1,12 @@
 # src/data_loader.py
 
 import pandas as pd
+from pandas import DataFrame
 import os
 import numpy as np
 import pandas_ta as ta
-from typing import Dict, Any
+from typing import Dict, Any, Union
+from src.config_loader import Config
 
 
 class DataLoader:
@@ -17,6 +19,7 @@ class DataLoader:
         self.data_folder = 'output_parquet/'
         self.cache = {}
         self.support_resistance = {}  # New attribute to store support and resistance levels
+        self.funding_rates = {}  # New attribute to store funding rate data
 
     def import_ticks(self):
         """
@@ -35,6 +38,9 @@ class DataLoader:
         tick_data_1m.set_index('timestamp', inplace=True)
         # Sort the index
         tick_data_1m.sort_index(inplace=True)
+        # Filter data by date
+        config = Config()
+        tick_data_1m = self.filter_data_by_date(tick_data_1m, config.get('start_cutoff'), config.get('end_cutoff'))
         # Store base timeframe data
         self.tick_data[self.base_timeframe] = tick_data_1m
 
@@ -93,9 +99,6 @@ class DataLoader:
         Calculates a single indicator on the provided data.
         """
         data = self.tick_data[timeframe].copy()
-        cache_key = (indicator_name, tuple(sorted(params.items())), timeframe)
-        if cache_key in self.cache:
-            return self.cache[cache_key]
         if indicator_name == 'sma':
             length = int(params['length'])
             data[f'SMA_{length}'] = ta.sma(data['close'], length=length).astype(float)
@@ -212,9 +215,44 @@ class DataLoader:
             result = data[['VWAP']].dropna()
         else:
             raise ValueError(f"Indicator {indicator_name} is not implemented.")
-        self.cache[cache_key] = result
         return result
 
     def clear_variables(self):
         self.tick_data = {}
-        self.cache = {}
+
+    def filter_data_by_date(self, df: DataFrame, start_date: Union[str, pd.Timestamp], end_date: Union[str, pd.Timestamp]):
+        """
+        Filters each timeframe's DataFrame to keep only the rows between start_date and end_date.
+
+        Parameters:
+        - start_date (str or pd.Timestamp): The start date for filtering (inclusive).
+        - end_date (str or pd.Timestamp): The end date for filtering (inclusive).
+
+        Example:
+            data_loader.filter_data_by_date('2023-01-01', '2023-12-31')
+        """
+        # Convert start_date and end_date to pd.Timestamp if they are strings
+        start_date = pd.to_datetime(start_date)
+        end_date = pd.to_datetime(end_date)
+
+        if start_date > end_date:
+            raise ValueError("start_date must be earlier than or equal to end_date.")
+
+        if df.empty:
+            print(f"Warning: The DataFrame for timeframe '{tf}' is empty. Skipping filter.")
+            return df
+
+        # Ensure the DataFrame has a DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            try:
+                df.index = pd.to_datetime(df.index)
+                df.sort_index(inplace=True)
+            except Exception as e:
+                print(f"Error converting index to DatetimeIndex for timeframe '{tf}': {e}")
+                return df
+
+        # Filter the DataFrame
+        filtered_df = df.loc[(df.index >= start_date) & (df.index <= end_date)]
+
+        # Update the tick_data dictionary with the filtered DataFrame
+        return filtered_df

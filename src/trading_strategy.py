@@ -68,23 +68,9 @@ class TradingStrategy:
         self.funding_rates = self.data_loader.funding_rates
         self.id_trade = -1
         self.month = 1
-        self.alpha = 0
-        self.alphaneg = 0
         self.funding_rate = 0
 
         self.orders = []
-
-        # Parameters (from your existing code)
-        self.N_TICKS_DELTA = config.get('N_TICKS_DELTA', 8)
-        self.N_TICKS_DELTA_NEG = config.get('N_TICKS_DELTA_NEG', 100)
-        self.PCT_VOLUME_DISTANCE = config.get('PCT_VOLUME_DISTANCE', 0.4)
-        self.PCT_VOLUME_DISTANCE_NEGATIVE = config.get('PCT_VOLUME_DISTANCE_NEGATIVE', 4)
-        self.MULT_NEG_DELTA = config.get('MULT_NEG_DELTA', 32)
-        self.pct_distance = 100
-        self.N_REBUY = config.get('N_REBUY', 7)
-        self.DEFAULT_PCT_STOP_LOSS = config.get('DEFAULT_PCT_STOP_LOSS', -15)
-        self.PCT_QTY_ORDER = config.get('PCT_QTY_ORDER', 10)
-        self.PCT_STOP_LOSS = config.get('PCT_STOP_LOSS', -3)
 
         self.step_rebuy = 2
 
@@ -92,21 +78,11 @@ class TradingStrategy:
 
         # Load data (from your existing code)
         self.calc_sr = self.data_loader.calc_sr
-        self.calc_alpha = self.data_loader.calc_alpha
-        self.ticks_1m = self.data_loader.ticks_1m
-        self.ticks_5m = self.data_loader.ticks_5m
 
-        # Internal variables (from your existing code)
-        self.old_min_alpha = 0
-        self.old_min_fr = 0
-        self.old_min_sr = 0
 
         # Trades data (from your existing code)
-        self.trades = {}
-        self.trades['price'] = []
-        self.trades['timestamp'] = []
+        self.trades = {'price': [], 'timestamp': []}
         self.id_trade = -1
-        self.month = 2
         self.current_time = 0
         self.last_price = 0
 
@@ -201,16 +177,6 @@ class TradingStrategy:
                             self.place_order_buy(self.order_qty)
                         elif self.current_order['quantity'] != 0 and sell_prob > self.threshold_sell:
                             self.place_order_sell(abs(self.current_order['quantity']))
-                        else:
-                            # Existing logic when not using models
-                            self.last_support_resistance()
-                            if self.last_support > 0 or self.last_resistance > 0:
-                                self.fetch_price()
-                    else:
-                        # If current time not in features index, proceed with existing logic
-                        self.last_support_resistance()
-                        if self.last_support > 0 or self.last_resistance > 0:
-                            self.fetch_price()
                 except Exception as e:
                     pass
             self.data_loader.clear_variables()

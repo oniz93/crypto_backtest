@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 
-
 def convert_date_to_time(date_str):
     """Converts a date string to a datetime object."""
     return datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')

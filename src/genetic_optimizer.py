@@ -3,6 +3,7 @@
 import numpy as np
 from geneticalgorithm import geneticalgorithm as ga
 import multiprocessing
+from src.config_loader import Config
 
 class GeneticOptimizer:
     def __init__(self, strategy_class, data_loader):
@@ -30,20 +31,20 @@ class GeneticOptimizer:
         """
         return {
             'sma': {'length': (5, 200)},
-            'ema': {'length': (5, 200)},
-            'rsi': {'length': (5, 30)},
-            'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
-            'bbands': {'length': (5, 50), 'std_dev': (1.0, 3.0)},
-            'atr': {'length': (5, 50)},
-            'stoch': {'k': (5, 20), 'd': (3, 10)},
+            ##'ema': {'length': (5, 200)},
+            ##'rsi': {'length': (5, 30)},
+            ##'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
+            ##'bbands': {'length': (5, 50), 'std_dev': (1.0, 3.0)},
+            ##'atr': {'length': (5, 50)},
+            # 'stoch': {'k': (5, 20), 'd': (3, 10)},
             # 'cci': {'length': (5, 50)},
-            'adx': {'length': (5, 50)},
+            ##'adx': {'length': (5, 50)},
             # 'cmf': {'length': (5, 50)},
             # 'mfi': {'length': (5, 30)},
             # 'roc': {'length': (5, 50)},
             # 'willr': {'length': (5, 30)},
             # 'psar': {'acceleration': (0.01, 0.1), 'max_acceleration': (0.1, 0.5)},
-            'ichimoku': {'tenkan': (5, 20), 'kijun': (20, 60), 'senkou': (40, 100)},
+            # 'ichimoku': {'tenkan': (5, 20), 'kijun': (20, 60), 'senkou': (40, 100)},
             # 'keltner': {'length': (5, 50), 'multiplier': (1.0, 3.0)},
             # 'donchian': {'lower_length': (5, 50), 'upper_length': (5, 50)},
             # 'emv': {'length': (5, 20)},
@@ -53,7 +54,7 @@ class GeneticOptimizer:
             # 'dpo': {'length': (5, 50)},
             # 'trix': {'length': (5, 50)},
             # 'chaikin_osc': {'fast': (3, 10), 'slow': (10, 20)},
-            'vwap': {},
+            #'vwap': {},
             # Indicators without parameters are not included
         }
 
@@ -193,6 +194,10 @@ class GeneticOptimizer:
             'open', 'high', 'low', 'close', 'volume',
             'future_return', 'buy_signal', 'sell_signal'
         ])
+
+        # Filter data by date
+        config = Config()
+        features = self.data_loader.filter_data_by_date(features, config.get('start_simulation'), config.get('end_simulation'))
 
         # Align labels with features
         self.labels_buy = self.labels_buy.loc[features.index]
