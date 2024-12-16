@@ -13,9 +13,9 @@ class DataLoader:
     def __init__(self):
         self.tick_data = {}
         self.timeframes = [
-            '1T', '5T', '15T', '30T', '45T', '1H', '2H', '4H', '8H', '12H', '1D', '1W'
+            '1min', '5min', '15min', '30min', '45min', '1h', '2h', '4h', '8h', '12h', '1d', '1w'
         ]
-        self.base_timeframe = '1T'  # Base timeframe is 1 minute
+        self.base_timeframe = '1min'  # Base timeframe is 1 minute
         self.data_folder = 'output_parquet/'
         self.cache = {}
         self.support_resistance = {}  # New attribute to store support and resistance levels

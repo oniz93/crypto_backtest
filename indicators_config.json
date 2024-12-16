@@ -1,0 +1,18 @@
+{
+    "sma": {"length": [5, 200]},
+    "ema": {"length": [5, 200]},
+    "rsi": {"length": [5, 30]},
+    "atr": {"length": [5, 50]},
+    "cci": {"length": [5, 50]},
+    "adx": {"length": [5, 50]},
+    "cmf": {"length": [5, 50]},
+    "mfi": {"length": [5, 30]},
+    "roc": {"length": [5, 50]},
+    "willr": {"length": [5, 30]},
+    "emv": {"length": [5, 20]},
+    "force": {"length": [1, 20]},
+    "volatility": {"length": [5, 50]},
+    "dpo": {"length": [5, 50]},
+    "trix": {"length": [5, 50]},
+    "vwap": {}
+}

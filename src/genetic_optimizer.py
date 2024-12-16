@@ -1,9 +1,14 @@
 # src/genetic_optimizer.py
 
+import multiprocessing
+
 import numpy as np
 from geneticalgorithm import geneticalgorithm as ga
-import multiprocessing
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import KFold
+
 from src.config_loader import Config
+
 
 class GeneticOptimizer:
     def __init__(self, strategy_class, data_loader):
@@ -13,7 +18,7 @@ class GeneticOptimizer:
         self.indicators = self.define_indicators()
         self.timeframes = [
             # '1T', '5T', '15T', '30T', '45T', '1H', '2H', '4H', '8H', '12H', '1D'
-            '1T', '5T', '15T', '30T',  '1H', '4H', '1D'
+            '1min', '5min', '15min', '30min',  '1h', '4h', '1d'
         ]
         # Define model parameters and their ranges
         self.model_params = {
@@ -31,14 +36,14 @@ class GeneticOptimizer:
         """
         return {
             'sma': {'length': (5, 200)},
-            ##'ema': {'length': (5, 200)},
-            ##'rsi': {'length': (5, 30)},
-            ##'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
-            ##'bbands': {'length': (5, 50), 'std_dev': (1.0, 3.0)},
-            ##'atr': {'length': (5, 50)},
-            # 'stoch': {'k': (5, 20), 'd': (3, 10)},
+            'ema': {'length': (5, 200)},
+            'rsi': {'length': (5, 30)},
+            'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
+            'bbands': {'length': (5, 50), 'std_dev': (1.0, 3.0)},
+            'atr': {'length': (5, 50)},
+            'stoch': {'k': (5, 20), 'd': (3, 10)},
             # 'cci': {'length': (5, 50)},
-            ##'adx': {'length': (5, 50)},
+            # 'adx': {'length': (5, 50)},
             # 'cmf': {'length': (5, 50)},
             # 'mfi': {'length': (5, 30)},
             # 'roc': {'length': (5, 50)},
@@ -54,7 +59,7 @@ class GeneticOptimizer:
             # 'dpo': {'length': (5, 50)},
             # 'trix': {'length': (5, 50)},
             # 'chaikin_osc': {'fast': (3, 10), 'slow': (10, 20)},
-            #'vwap': {},
+            # 'vwap': {},
             # Indicators without parameters are not included
         }
 
@@ -205,24 +210,39 @@ class GeneticOptimizer:
 
         return features
 
-    def train_models(self, X_train, y_train_buy, y_train_sell, model_params):
+    def train_models(self, X_train, y_train_buy, y_train_sell, model_params, n_splits=5):
         """
-        Trains the models using the features and labels.
+        Trains the models using cross-validation and returns the averaged models.
         """
         model_C = model_params['model_C']
-        from sklearn.linear_model import LogisticRegression
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
 
-        model_buy = LogisticRegression(C=model_C, max_iter=1000)
-        model_buy.fit(X_train, y_train_buy)
+        models_buy = []
+        models_sell = []
 
-        model_sell = LogisticRegression(C=model_C, max_iter=1000)
-        model_sell.fit(X_train, y_train_sell)
+        for train_index, val_index in kf.split(X_train):
+            X_tr, X_val = X_train.iloc[train_index], X_train.iloc[val_index]
+            y_tr_buy, y_val_buy = y_train_buy.iloc[train_index], y_train_buy.iloc[val_index]
+            y_tr_sell, y_val_sell = y_train_sell.iloc[train_index], y_train_sell.iloc[val_index]
 
-        return model_buy, model_sell
+            model_buy = LogisticRegression(C=model_C, max_iter=1000)
+            model_buy.fit(X_tr, y_tr_buy)
+            models_buy.append(model_buy)
 
-    def evaluate(self, individual):
+            model_sell = LogisticRegression(C=model_C, max_iter=1000)
+            model_sell.fit(X_tr, y_tr_sell)
+            models_sell.append(model_sell)
+
+        return models_buy, models_sell
+
+    def evaluate(self, individual, n_evaluations=3, n_splits=5):
         """
-        Evaluate the fitness of an individual.
+        Evaluate the fitness of an individual by running multiple strategy evaluations with cross-validation.
+
+        Parameters:
+        - individual: The individual to evaluate.
+        - n_evaluations (int): Number of times to run the strategy for averaging.
+        - n_splits (int): Number of cross-validation splits.
         """
         config = self.extract_config_from_individual(individual)
         indicator_params = config['indicator_params']
@@ -245,23 +265,41 @@ class GeneticOptimizer:
         y_train_sell = labels_sell.iloc[:split_index]
         # X_test and y_test can be used for evaluation if needed
 
-        # Train models using model parameters
-        model_buy, model_sell = self.train_models(X_train, y_train_buy, y_train_sell, model_params)
+        # Initialize list to store profits from each evaluation
+        profits = []
 
-        # Create configuration for the strategy
-        strategy_config = {
-            'threshold_buy': model_params['threshold_buy'],
-            'threshold_sell': model_params['threshold_sell'],
-            # Include other config parameters if needed
-        }
+        for _ in range(n_evaluations):
+            # Train models using model parameters with cross-validation
+            models_buy, models_sell = self.train_models(X_train, y_train_buy, y_train_sell, model_params, n_splits=n_splits)
 
-        # Initialize the TradingStrategy with the trained models and config
-        strategy = self.strategy_class(self.data_loader, strategy_config, model_buy, model_sell)
+            # Aggregate predictions from all models
+            def aggregate_predictions(models, X):
+                predictions = np.array([model.predict(X) for model in models])
+                # Majority voting
+                majority_preds = np.apply_along_axis(lambda x: np.bincount(x).argmax(), axis=0, arr=predictions)
+                return majority_preds
 
-        # Run the strategy to get profit
-        profit = strategy.calculate_profit()
+            aggregated_buy = aggregate_predictions(models_buy, features)
+            aggregated_sell = aggregate_predictions(models_sell, features)
 
-        return -profit  # Negative profit for minimization
+            # Create configuration for the strategy
+            strategy_config = {
+                'threshold_buy': model_params['threshold_buy'],
+                'threshold_sell': model_params['threshold_sell'],
+                # Include other config parameters if needed
+            }
+
+            # Initialize the TradingStrategy with the aggregated predictions and config
+            strategy = self.strategy_class(self.data_loader, strategy_config, aggregated_buy, aggregated_sell)
+
+            # Run the strategy to get profit
+            profit = strategy.calculate_profit()
+            profits.append(profit)
+
+        # Calculate the average profit across evaluations
+        average_profit = np.mean(profits)
+
+        return -average_profit  # Negative profit for minimization
 
     def run(self):
         varbound, vartype = self.get_varbound_and_vartype()
