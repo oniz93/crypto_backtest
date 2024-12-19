@@ -10,3 +10,5 @@ data
 old_code
 output_parquet/BTCUSDT-trades.parquet
 trades_history
+tot.txt
+printContent.sh

@@ -1,0 +1,95 @@
+# src/rl_agent.py
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class QNetwork(nn.Module):
+    def __init__(self, state_dim, action_dim, hidden_size=64):
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_dim, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, action_dim)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
+
+class DQNAgent:
+    def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99, epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
+        self.epsilon_min = epsilon_min
+
+        self.q_net = QNetwork(state_dim, action_dim)
+        self.target_net = QNetwork(state_dim, action_dim)
+        self.target_net.load_state_dict(self.q_net.state_dict())
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
+
+        self.buffer = []
+        self.batch_size = 64
+        self.update_target_every = 100
+        self.step_count = 0
+
+    def select_action(self, state):
+        if np.random.rand() < self.epsilon:
+            return np.random.randint(self.action_dim)
+        state_t = torch.FloatTensor(state).unsqueeze(0)
+        with torch.no_grad():
+            q_values = self.q_net(state_t)
+        return q_values.argmax().item()
+
+    def store_transition(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+        if len(self.buffer) > 10000:
+            self.buffer.pop(0)
+
+    def update_policy(self):
+        if len(self.buffer) < self.batch_size:
+            return
+        batch = np.random.choice(len(self.buffer), self.batch_size, replace=False)
+        states, actions, rewards, next_states, dones = [],[],[],[],[]
+        for idx in batch:
+            s,a,r,ns,d = self.buffer[idx]
+            states.append(s)
+            actions.append(a)
+            rewards.append(r)
+            next_states.append(ns)
+            dones.append(d)
+
+        states_t = torch.FloatTensor(states)
+        actions_t = torch.LongTensor(actions).unsqueeze(1)
+        rewards_t = torch.FloatTensor(rewards).unsqueeze(1)
+        next_states_t = torch.FloatTensor(next_states)
+        dones_t = torch.FloatTensor(dones).unsqueeze(1)
+
+        q_values = self.q_net(states_t).gather(1, actions_t)
+        with torch.no_grad():
+            max_next_q = self.target_net(next_states_t).max(1)[0].unsqueeze(1)
+            target = rewards_t + self.gamma * max_next_q * (1 - dones_t)
+
+        loss = ((q_values - target)**2).mean()
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.step_count += 1
+        if self.step_count % self.update_target_every == 0:
+            self.target_net.load_state_dict(self.q_net.state_dict())
+
+        # Decay epsilon
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+    def save(self, path):
+        torch.save(self.q_net.state_dict(), path)
+
+    def load(self, path):
+        self.q_net.load_state_dict(torch.load(path))
+        self.target_net.load_state_dict(self.q_net.state_dict())

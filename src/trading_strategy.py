@@ -9,7 +9,6 @@ import csv
 import json
 
 from datetime import datetime, timedelta, timezone
-
 from pandas import Timestamp
 
 from src.data_loader import DataLoader
@@ -26,13 +25,20 @@ class TradingStrategy:
         self.config = config
         self.cl = Config()
 
-        # Models and thresholds provided externally
+        # Model can be arrays or actual models. If arrays, we store them separately:
         self.model_buy = model_buy
         self.model_sell = model_sell
+
         self.threshold_buy = config.get('threshold_buy', 0.6)
         self.threshold_sell = config.get('threshold_sell', 0.6)
 
-        # Initialize attributes (from your existing code)
+        # For aggregated predictions:
+        # We will assume that if aggregated arrays exist, they are assigned after initialization:
+        self.aggregated_buy = None
+        self.aggregated_sell = None
+        self.current_step = 0  # steps through features/index
+
+        # The rest of initialization remains unchanged
         self.last_support = 0
         self.last_resistance = 0
         self.last_order_price = 0
@@ -81,74 +87,50 @@ class TradingStrategy:
 
         self.rand_number = random.randint(1, 1234567890)
 
-        # Load data (from your existing code)
-        #self.calc_sr = self.data_loader.calc_sr
-
-
-        # Trades data (from your existing code)
         self.trades = {'price': [], 'timestamp': []}
         self.id_trade = -1
         self.current_time = 0
         self.current_timestamp = 0
         self.last_price = 0
 
-        # Prepare features data (indicators)
         self.features = self.prepare_features()
 
     def prepare_features(self):
-        """
-        Prepares the features (indicators) data.
-        """
         base_tf = self.data_loader.base_timeframe
         price_data = self.data_loader.tick_data[base_tf].copy()
-
-        # Merge all indicators into one DataFrame
-        indicators_df = price_data.copy()
-        # Ensure self.data_loader.indicators exists
         if hasattr(self.data_loader, 'indicators'):
+            indicators_df = price_data.copy()
             for indicator_name, tf_dict in self.data_loader.indicators.items():
-                for tf, df in tf_dict.items():
-                    # Resample or reindex to base timeframe if necessary
-                    df = df.reindex(indicators_df.index, method='ffill')
-                    indicators_df = indicators_df.join(df, rsuffix=f'_{indicator_name}_{tf}')
+                if '1min' in tf_dict:
+                    df = tf_dict['1min']
+                    df = df.reindex(indicators_df.index, method='ffill').add_suffix(f'_{indicator_name}')
+                    indicators_df = indicators_df.join(df)
+            indicators_df.dropna(inplace=True)
+            features = indicators_df.drop(columns=['open','high','low','close','volume','future_return','buy_signal','sell_signal'], errors='ignore')
+            return features
         else:
-            print("Indicators not found in data_loader.")
-            # Handle this case appropriately
+            return pd.DataFrame()
 
-        # Drop rows with NaN values
-        indicators_df.dropna(inplace=True)
-
-        # Exclude price columns and other non-feature columns
-        features = indicators_df.drop(columns=[
-            'open', 'high', 'low', 'close', 'volume'
-        ])
-        return features
+    def set_aggregated_predictions(self, aggregated_buy, aggregated_sell):
+        """
+        Called by the evaluator to set aggregated predictions arrays.
+        """
+        self.aggregated_buy = aggregated_buy
+        self.aggregated_sell = aggregated_sell
 
     def analyze_buy(self, indicator_values):
         """
-        Predicts the probability of a price increase using the buy model.
-
-        Parameters:
-        - indicator_values: array-like, the indicator values at the current time step.
-
-        Returns:
-        - float: probability between 0 and 1.
+        If using arrays, we no longer predict here.
+        If still using models, we predict_proba.
         """
-        prob = self.model_buy.predict_proba([indicator_values])[0][1]  # Probability of class 1
-        return prob
+        # If using aggregated predictions, just return a probability based on aggregated array
+        # For now, let's assume aggregated arrays are binary (0/1).
+        # If you want probabilities, adjust your aggregator in GA to average predict_proba instead.
+        # Let's assume aggregated arrays are binary signals. If needed, incorporate probabilities.
+        return 1.0 if self.aggregated_buy[self.current_step] == 1 else 0.0
 
     def analyze_sell(self, indicator_values):
-        """
-        Predicts the probability of a price decrease using the sell model.
-
-        Parameters:
-        - indicator_values: array-like, the indicator values at the current time step.
-
-        Returns:
-        - float: probability between 0 and 1.
-        """
-        prob = self.model_sell.predict_proba([indicator_values])[0][1]  # Probability of class 1
-        return prob
+        return 1.0 if self.aggregated_sell[self.current_step] == 1 else 0.0
 
     def calculate_profit(self):
         """
@@ -156,27 +138,27 @@ class TradingStrategy:
         """
         try:
             start_time = time.time()
-            # Load initial trades
             self.read_next_trade()
+            # We'll iterate over trades and use aggregated predictions
             while self.last_price >= 0:
-                if self.current_time % 3600000 == 0:
-                    # Print status every hour
-                    pass
-
                 self.read_next_trade()
                 if self.last_price == -1:
                     self.data_loader.clear_variables()
                     return self.write_orders()
+
                 try:
                     self.get_open_positions()
-                    # Prepare current indicator values
                     if self.current_timestamp in self.features.index:
+                        # Instead of analyzing fresh from model, we use aggregated arrays:
+                        # current_step is index in features
+                        # Map current_timestamp to self.features index position
+                        step_idx = self.features.index.get_loc(self.current_timestamp)
+                        self.current_step = step_idx
                         indicator_values = self.features.loc[self.current_timestamp].values
-                        # Use analyze_buy and analyze_sell methods
+
                         buy_prob = self.analyze_buy(indicator_values)
                         sell_prob = self.analyze_sell(indicator_values)
 
-                        # Decision logic based on probabilities
                         if self.current_order['quantity'] == 0 and buy_prob > self.threshold_buy:
                             self.get_available_balance()
                             self.place_order_buy(self.order_qty)
@@ -190,15 +172,11 @@ class TradingStrategy:
             self.data_loader.clear_variables()
             return 0
 
-    # The rest of your existing methods remain unchanged
-    # ...
-    # Include all methods from your existing code
-
     def read_next_trade(self):
         self.id_trade += 1
         if self.id_trade == 0:
             month_str = str(self.month).zfill(2)
-            trades_file = f"trades_history/BTCUSDT-trades-aggregated-2021-{month_str}.parquet"
+            trades_file = f"trades_history/BTCUSDT-trades-aggregated-2023-{month_str}.parquet"
             if os.path.exists(trades_file):
                 trades_df = pd.read_parquet(trades_file)
                 self.trades['price'] = trades_df['price'].tolist()
@@ -211,7 +189,6 @@ class TradingStrategy:
             self.current_timestamp = self.trades['timestamp'][self.id_trade]
             self.current_time = int(self.trades['timestamp'][self.id_trade].timestamp())
         except IndexError:
-            # End of trades for current month, try next month
             self.month += 1
             month_str = str(self.month).zfill(2)
             trades_file = f"data/BTCUSDT-trades-aggregated-2023-{month_str}.csv"
@@ -230,7 +207,6 @@ class TradingStrategy:
         orders_df = pd.DataFrame(self.orders)
         orders_filename = f"orders/{self.short_long}_{self.rand_number}.csv"
         orders_df.to_csv(orders_filename, header=False, index=False)
-        # Additional processing and writing of stats can be added here
         try:
             perc_profit = round((orders_df.iloc[-1][1] - self.initial_balance) / self.initial_balance * 100, 4)
         except Exception:
@@ -240,7 +216,9 @@ class TradingStrategy:
     def get_available_balance(self):
         sat_balance = self.available_balance
         usd_balance = sat_to_usd(sat_balance, self.last_price)
-        self.order_qty = usd_balance / 100 * self.PCT_QTY_ORDER
+        # Ensure PCT_QTY_ORDER is defined. If not, define a default:
+        PCT_QTY_ORDER = self.config.get('PCT_QTY_ORDER', 10)
+        self.order_qty = usd_balance / 100 * PCT_QTY_ORDER
         self.order_qty = round_to_100(self.order_qty)
 
     def get_open_positions(self):
@@ -423,5 +401,3 @@ class TradingStrategy:
         self.PCT_STOP_LOSS = -abs(self.alphaneg * self.MULT_NEG_DELTA)
         if self.PCT_STOP_LOSS > self.DEFAULT_PCT_STOP_LOSS:
             self.PCT_STOP_LOSS = self.DEFAULT_PCT_STOP_LOSS
-
-    # Include any additional methods from your existing code
