@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import logging
 
+# Configure logger (ensure this matches the logger in genetic_optimizer.py)
 logger = logging.getLogger('GeneticOptimizer')
 
 class TradingEnvironment:
@@ -55,7 +56,7 @@ class TradingEnvironment:
         # Mode-specific actions
         if self.mode == "long":
             if action == 1:  # Buy
-                if self.inventory == 0:
+                if self.inventory == 0 and self.cash > 0:
                     qty = self.cash / current_price
                     qty_after_cost = qty * (1 - self.transaction_cost)
                     self.inventory = qty_after_cost
@@ -72,7 +73,7 @@ class TradingEnvironment:
                     logger.debug(f"Action Sell executed. Cash: {self.cash}")
         elif self.mode == "short":
             if action == 1:  # Sell to go short
-                if self.inventory == 0:
+                if self.inventory == 0 and self.cash > 0:
                     qty = self.cash / current_price
                     qty_after_cost = qty * (1 - self.transaction_cost)
                     self.inventory = -qty_after_cost  # Negative inventory indicates a short position
@@ -87,9 +88,11 @@ class TradingEnvironment:
                     self.entry_price = 0.0
                     logger.debug(f"Action Cover Short executed. Cash: {self.cash}")
 
-        # Determine if the next step will be out-of-bounds
+        # Determine the next step
         next_step = self.current_step + 1
-        done = next_step >= self.n_steps or next_step >= self.max_steps
+
+        # Check if the next step is out-of-bounds or if balance and inventory are zero
+        done = next_step >= self.n_steps or next_step >= self.max_steps or (self.cash == 0 and self.inventory == 0)
 
         if not done:
             # Access new price if not done
@@ -107,12 +110,17 @@ class TradingEnvironment:
                 logger.error(f"Failed to get next state for step {next_step}. Setting to zeros.")
                 next_state = np.zeros(self.state_dim)
         else:
+            if self.cash == 0 and self.inventory == 0:
+                logger.info("Balance is 0 and inventory is 0. Stopping training.")
             # If done, use the last valid price and set next_state to zeros
             new_price = self.data['close'].iloc[self.current_step]
             portfolio_after = self.cash + self.inventory * new_price
             reward = portfolio_after - portfolio_before
             next_state = np.zeros(self.state_dim)
-            logger.debug("Reached end of data. Setting next_state to zeros.")
+            if next_step >= self.n_steps or next_step >= self.max_steps:
+                logger.debug("Reached end of data. Setting next_state to zeros.")
+            elif self.cash == 0 and self.inventory == 0:
+                logger.debug("No more operations possible. Setting next_state to zeros.")
 
         # Update the current step
         self.current_step = next_step
