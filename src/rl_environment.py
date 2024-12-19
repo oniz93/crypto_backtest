@@ -70,7 +70,7 @@ class TradingEnvironment:
                     self.cash += proceeds_after_cost
                     self.inventory = 0.0
                     self.entry_price = 0.0
-                    logger.debug(f"Action Sell executed. Cash: {self.cash}")
+                    logger.debug(f"Action Sell executed. Cash: {self.cash}, Close Price: {current_price}")
         elif self.mode == "short":
             if action == 1:  # Sell to go short
                 if self.inventory == 0 and self.cash > 0:
@@ -86,7 +86,7 @@ class TradingEnvironment:
                     self.cash -= cost_after_cost
                     self.inventory = 0.0
                     self.entry_price = 0.0
-                    logger.debug(f"Action Cover Short executed. Cash: {self.cash}")
+                    logger.debug(f"Action Cover Short executed. Cash: {self.cash}, Close Price: {current_price}")
 
         # Determine the next step
         next_step = self.current_step + 1
@@ -124,7 +124,7 @@ class TradingEnvironment:
 
         # Update the current step
         self.current_step = next_step
-
-        logger.debug(f"Step: {self.current_step} - Reward: {reward} - Done: {done}")
+        if self.current_step % 1000 == 0:
+            logger.debug(f"Step: {self.current_step} - Balance: {portfolio_after} - Done: {done}")
 
         return next_state, reward, done, {}

@@ -6,7 +6,8 @@ from geneticalgorithm import geneticalgorithm as ga
 import os
 import json
 import pandas as pd
-import logging  # Import logging module
+import logging
+import sys
 
 from src.config_loader import Config
 from src.rl_environment import TradingEnvironment
@@ -17,20 +18,30 @@ logger = logging.getLogger('GeneticOptimizer')
 logger.setLevel(logging.DEBUG)  # Capture all levels of logs
 
 # Create handlers
-console_handler = logging.StreamHandler()
+console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)  # Adjust as needed
 
-file_handler = logging.FileHandler('genetic_optimizer.log')
-file_handler.setLevel(logging.DEBUG)  # Detailed logs go to the file
+# Named Pipe Handler
+pipe_path = '/tmp/genetic_optimizer_logpipe'  # Path to your named pipe
+if not os.path.exists(pipe_path):
+    os.mkfifo(pipe_path)
+
+try:
+    pipe = open(pipe_path, 'w')
+    pipe_handler = logging.StreamHandler(pipe)
+    pipe_handler.setLevel(logging.DEBUG)  # Capture detailed logs
+except Exception as e:
+    logger.error(f"Failed to open named pipe {pipe_path}: {e}")
+    pipe_handler = logging.NullHandler()
 
 # Create formatters and add them to handlers
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
-file_handler.setFormatter(formatter)
+pipe_handler.setFormatter(formatter)
 
 # Add handlers to the logger
 logger.addHandler(console_handler)
-logger.addHandler(file_handler)
+logger.addHandler(pipe_handler)
 
 class GeneticOptimizer:
     def __init__(self, data_loader, indicators_dir='precalculated_indicators_parquet', checkpoint_dir='checkpoints', checkpoint_file=None):
@@ -206,16 +217,18 @@ class GeneticOptimizer:
         3. Creating RL environment
         4. Running RL training and returning final avg profit as fitness
         """
+        import multiprocessing
+        process_id = multiprocessing.current_process().pid
         config = self.extract_config_from_individual(individual)
         indicators = self.load_indicators(config)
         features_df = self.prepare_features(indicators)
 
         if len(features_df) < 100:
-            logger.warning("Not enough data to run RL.")
+            logger.warning(f"Process {process_id}: Not enough data to run RL.")
             return 0
 
         if 'close' not in features_df.columns:
-            logger.error("'close' column missing in features_df.")
+            logger.error(f"Process {process_id}: 'close' column missing in features_df.")
             return 0
 
         price_data = features_df[['close']]
@@ -224,13 +237,13 @@ class GeneticOptimizer:
         env = self.create_environment(price_data, indicators_only)
 
         # Log individual parameters
-        logger.debug(f"Evaluating Individual Parameters: {config}")
+        logger.debug(f"Process {process_id}: Evaluating Individual Parameters: {config}")
 
         # Run RL training
         agent, avg_profit = self.run_rl_training(env, episodes=rl_episodes)
 
         # Log fitness
-        logger.debug(f"Individual Fitness (Negative Avg Profit): {-avg_profit}")
+        logger.debug(f"Process {process_id}: Individual Fitness (Negative Avg Profit): {-avg_profit}")
 
         # Since GA's evaluate function expects a fitness value, return -avg_profit
         # Negative because GA minimizes, but we want to maximize profit
@@ -255,8 +268,8 @@ class GeneticOptimizer:
             'parents_portion': 0.3,
             'crossover_type': 'two_point',
             'max_iteration_without_improv': 1000,
-            'multiprocessing_ncpus': multiprocessing.cpu_count(),
-            'multiprocessing_engine': None,
+            'multiprocessing_ncpus': 5,  # Use 3 CPUs
+            'multiprocessing_engine': 'process',  # Use multiprocessing
             # 'callback_generation': self.generation_callback  # Uncomment if supported
         }
 
