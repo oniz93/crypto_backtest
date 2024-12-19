@@ -1,8 +1,8 @@
 start_simulation: 2023-01-01
-end_simulation: 2023-01-31
+end_simulation: 2023-01-08
 start_cutoff: 2022-01-01
-end_cutoff: 2023-01-31
+end_cutoff: 2023-01-08
 training_mode: "long"
 PCT_QTY_ORDER: 10
-initial_balance: 100000000
+initial_balance: 100000
 treshold_price: 0.00001

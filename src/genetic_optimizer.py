@@ -1,4 +1,5 @@
 # src/genetic_optimizer.py
+
 import multiprocessing
 import numpy as np
 from geneticalgorithm import geneticalgorithm as ga
@@ -7,27 +8,38 @@ import json
 import pandas as pd
 
 from src.config_loader import Config
-
 from src.rl_environment import TradingEnvironment
 from src.rl_agent import DQNAgent
 
+
 class GeneticOptimizer:
-    def __init__(self, data_loader, indicators_dir='precalculated_indicators_parquet', checkpoint_dir='checkpoints'):
+    def __init__(self, data_loader, indicators_dir='precalculated_indicators_parquet', checkpoint_dir='checkpoints', checkpoint_file=None):
         self.data_loader = data_loader
         self.indicator_cache = {}
         self.indicators = self.define_indicators()
         self.timeframes = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']
-        # model_params could remain or be simplified since RL doesn't need them as before
+
+        # Define GA parameters and their bounds
         self.model_params = {
             'threshold_buy': (0.5, 0.9),
             'threshold_sell': (0.5, 0.9)
         }
         self.parameter_indices = self.create_parameter_indices()
+
         self.indicators_dir = indicators_dir
         self.checkpoint_dir = checkpoint_dir
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.prepare_data()
         self.config = Config()
+
+        # Initialize variables to hold loaded checkpoint data
+        self.loaded_best_config = None
+        self.loaded_best_fitness = None
+        self.loaded_best_agent_path = None
+
+        # Load checkpoint if provided
+        if checkpoint_file:
+            self.load_checkpoint(checkpoint_file)
 
     def define_indicators(self):
         # Define indicators and ranges for the GA
@@ -145,7 +157,7 @@ class GeneticOptimizer:
 
     def run_rl_training(self, env, episodes=10):
         """
-        Run RL training for a given environment and return average final profit.
+        Run RL training for a given environment and return the trained agent and average final profit.
         """
         agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3)
         total_rewards = []
@@ -162,9 +174,16 @@ class GeneticOptimizer:
                 ep_reward += reward
             total_rewards.append(ep_reward)
         avg_reward = np.mean(total_rewards)
-        return avg_reward
+        return agent, avg_reward
 
     def evaluate(self, individual, n_evaluations=1, rl_episodes=10):
+        """
+        Evaluate an individual by:
+        1. Extracting indicator params
+        2. Loading indicators and preparing features
+        3. Creating RL environment
+        4. Running RL training and returning final avg profit as fitness
+        """
         config = self.extract_config_from_individual(individual)
         indicators = self.load_indicators(config)
         features_df = self.prepare_features(indicators)
@@ -182,15 +201,15 @@ class GeneticOptimizer:
 
         env = self.create_environment(price_data, indicators_only)
 
-        print(f"Environment state_dim: {env.state_dim}, action_dim: {env.action_dim}")
-
         # Run RL training
-        avg_profit = self.run_rl_training(env, episodes=rl_episodes)
-        print(f"Average Profit: {avg_profit}")
+        agent, avg_profit = self.run_rl_training(env, episodes=rl_episodes)
 
-        return -avg_profit  # GA minimizes, we return negative
+        # Since GA's evaluate function expects a fitness value, return -avg_profit
+        # Negative because GA maximizes the function by default
+        return -avg_profit
 
     def create_environment(self, price_data, indicators):
+        # Create TradingEnvironment instance
         initial_capital = 100000
         transaction_cost = 0.001
         mode = self.config.get('training_mode')  # Should be 'long' or 'short'
@@ -200,14 +219,14 @@ class GeneticOptimizer:
     def run(self):
         varbound, vartype = self.get_varbound_and_vartype()
         algorithm_param = {
-            'max_num_iteration': None,
+            'max_num_iteration': 100,  # Set to desired number of generations
             'population_size': 20,
             'mutation_probability': 0.1,
             'elit_ratio': 0.01,
             'crossover_probability': 0.5,
             'parents_portion': 0.3,
             'crossover_type': 'two_point',
-            'max_iteration_without_improv': None,
+            'max_iteration_without_improv': 1000,
             'multiprocessing_ncpus': multiprocessing.cpu_count(),
             'multiprocessing_engine': None
         }
@@ -220,34 +239,111 @@ class GeneticOptimizer:
             function_timeout=1000000,
             algorithm_parameters=algorithm_param
         )
+
         model.run()
+
+        # After GA run, get the best individual
+        best_individual = model.output_dict['variable']
+        best_fitness = model.output_dict['function']
+
+        print(f"Best Individual Fitness: {-best_fitness}")
+
+        # Extract config
+        best_config = self.extract_config_from_individual(best_individual)
+
+        # Load indicators and prepare features
+        indicators = self.load_indicators(best_config)
+        features_df = self.prepare_features(indicators)
+
+        if len(features_df) < 100:
+            print("Not enough data to run RL for the best individual.")
+            return
+
+        if 'close' not in features_df.columns:
+            print("'close' column missing in features_df.")
+            return
+
+        price_data = features_df[['close']]
+        indicators_only = features_df.drop(columns=['close'], errors='ignore')
+
+        # Create environment
+        env = self.create_environment(price_data, indicators_only)
+
+        # Run RL training for the best individual
+        agent, avg_profit = self.run_rl_training(env, episodes=10)
+
+        print(f"Average Profit from RL Training: {avg_profit}")
+
+        # Save the RL agent's weights
+        best_agent_path = os.path.join(self.checkpoint_dir, f'best_agent_gen_{model.current_iteration}.pth') if hasattr(model,
+                                                                                                                        'current_iteration') else os.path.join(
+            self.checkpoint_dir, 'best_agent.pth')
+        agent.save(best_agent_path)
+        print(f"Saved RL agent's weights to {best_agent_path}")
+
+        # Save checkpoint
+        self.save_checkpoint(
+            generation=model.current_iteration if hasattr(model, 'current_iteration') else 0,
+            best_config=best_config,
+            best_fitness=best_fitness,
+            best_agent_path=best_agent_path
+        )
+        print(f"Saved checkpoint to {os.path.join(self.checkpoint_dir, 'ga_checkpoint.json')}")
 
     def test_individual(self, individual_params=None):
         if individual_params is None:
             total_params = self.get_total_parameters()
             varbound, vartypes = self.get_varbound_and_vartype()
-            individual = np.random.uniform(varbound[:, 0], varbound[:, 1]).tolist()
-            # Alternatively, handle integer and real types accordingly
+            individual = []
+            for idx in range(total_params):
+                low, high = varbound[idx]
+                vt = vartype[idx][0]
+                if vt == 'int':
+                    val = int(np.random.randint(low, high + 1))
+                else:
+                    val = float(np.random.uniform(low, high))
+                individual.append(val)
         else:
             individual = individual_params
         fitness = self.evaluate(individual)
         print(f"Fitness of the test individual: {fitness}")
         return fitness
 
-    def save_checkpoint(self, generation, population, model_path='model_checkpoint.joblib', config_path='config_checkpoint.json'):
+    def save_checkpoint(self, generation, best_config, best_fitness, best_agent_path):
         checkpoint_data = {
             'generation': generation,
-            'population': population
+            'best_individual_params': best_config,
+            'best_individual_fitness': best_fitness,
+            'best_agent_path': best_agent_path
         }
-        with open(os.path.join(self.checkpoint_dir, 'ga_checkpoint.json'), 'w') as f:
-            json.dump(checkpoint_data, f)
-
-    def load_checkpoint(self):
         checkpoint_file = os.path.join(self.checkpoint_dir, 'ga_checkpoint.json')
-        if os.path.exists(checkpoint_file):
-            with open(checkpoint_file, 'r') as f:
-                checkpoint_data = json.load(f)
-            generation = checkpoint_data['generation']
-            population = checkpoint_data['population']
-            return generation, population
-        return None, None
+        with open(checkpoint_file, 'w') as f:
+            json.dump(checkpoint_data, f)
+        print(f"Checkpoint saved to {checkpoint_file}")
+
+    def load_checkpoint(self, checkpoint_file):
+        with open(checkpoint_file, 'r') as f:
+            checkpoint_data = json.load(f)
+        generation = checkpoint_data.get('generation', 0)
+        best_individual_params = checkpoint_data.get('best_individual_params')
+        best_fitness = checkpoint_data.get('best_individual_fitness')
+        best_agent_path = checkpoint_data.get('best_agent_path')
+
+        print(f"Loaded checkpoint from generation {generation}")
+        print(f"Best individual fitness: {-best_fitness}")
+        print(f"Best agent weights path: {best_agent_path}")
+
+        # Optionally, load the RL agent's weights
+        if best_agent_path and os.path.exists(best_agent_path):
+            # Initialize a new DQNAgent with the correct dimensions
+            state_dim = self.data_loader.tick_data['1min'].shape[1] + 3  # Adjust as per your state_dim
+            action_dim = 3  # As defined in TradingEnvironment
+            agent = DQNAgent(state_dim=state_dim, action_dim=action_dim, lr=1e-3)
+            agent.load(best_agent_path)
+            self.loaded_best_agent = agent
+            print("Loaded best RL agent's weights.")
+        else:
+            print(f"Best agent weights file {best_agent_path} not found.")
+
+        # Note: Restoring the GA's population and state is not supported by the 'geneticalgorithm' package.
+        # If you need to resume the GA, you may need to implement a custom GA loop or use a different library.

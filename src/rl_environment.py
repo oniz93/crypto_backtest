@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 class TradingEnvironment:
-    def __init__(self, price_data, indicators, mode="long", initial_capital=100000, transaction_cost=0.001, max_steps=10000):
+    def __init__(self, price_data, indicators, mode="long", initial_capital=100000, transaction_cost=0.001, max_steps=100000000):
         self.price_data = price_data
         self.indicators = indicators
         self.initial_capital = initial_capital

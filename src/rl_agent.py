@@ -59,8 +59,7 @@ class DQNAgent:
         states = np.array(states)
         next_states = np.array(next_states)
 
-        # print(f"Batch States Shape: {states.shape}, Expected: ({self.batch_size}, {self.state_dim})")
-
+        # Convert to tensors efficiently
         states_t = torch.FloatTensor(states)
         actions_t = torch.LongTensor(actions).unsqueeze(1)
         rewards_t = torch.FloatTensor(rewards).unsqueeze(1)
@@ -88,7 +87,9 @@ class DQNAgent:
 
     def save(self, path):
         torch.save(self.q_net.state_dict(), path)
+        print(f"RL Agent's weights saved to {path}")
 
     def load(self, path):
         self.q_net.load_state_dict(torch.load(path))
         self.target_net.load_state_dict(self.q_net.state_dict())
+        print(f"RL Agent's weights loaded from {path}")
