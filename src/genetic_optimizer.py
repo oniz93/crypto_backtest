@@ -240,7 +240,7 @@ class GeneticOptimizer:
         # Create TradingEnvironment instance
         initial_capital = 100000
         transaction_cost = 0.001
-        mode = self.config.get('training_mode', 'long')  # Should be 'long' or 'short'
+        mode = self.config.get('training_mode')  # Should be 'long' or 'short'
         env = TradingEnvironment(price_data, indicators, initial_capital=initial_capital, transaction_cost=transaction_cost, mode=mode)
         return env
 
