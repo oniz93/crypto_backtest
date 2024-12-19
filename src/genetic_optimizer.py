@@ -165,43 +165,35 @@ class GeneticOptimizer:
         return avg_reward
 
     def evaluate(self, individual, n_evaluations=1, rl_episodes=10):
-        """
-        Evaluate an individual by:
-        1. Extracting indicator params
-        2. Loading indicators and preparing features
-        3. Creating RL environment
-        4. Running RL training and returning final avg profit as fitness
-        """
         config = self.extract_config_from_individual(individual)
         indicators = self.load_indicators(config)
         features_df = self.prepare_features(indicators)
 
         if len(features_df) < 100:
-            # Not enough data to run RL
+            print("Not enough data to run RL.")
             return 0
 
-        # Create an RL environment from features
-        # The environment needs price_data and indicators combined
-        # For simplicity, use features_df columns as indicators
-        # Ensure 'close' in features_df or keep a separate close column
         if 'close' not in features_df.columns:
-            return 0  # no price, can't train
-        # We'll separate price_data and indicators:
-        # price_data at least must have 'close'
+            print("'close' column missing in features_df.")
+            return 0
+
         price_data = features_df[['close']]
         indicators_only = features_df.drop(columns=['close'], errors='ignore')
 
         env = self.create_environment(price_data, indicators_only)
 
+        print(f"Environment state_dim: {env.state_dim}, action_dim: {env.action_dim}")
+
         # Run RL training
         avg_profit = self.run_rl_training(env, episodes=rl_episodes)
+        print(f"Average Profit: {avg_profit}")
+
         return -avg_profit  # GA minimizes, we return negative
 
     def create_environment(self, price_data, indicators):
-        # Create TradingEnvironment instance
         initial_capital = 100000
         transaction_cost = 0.001
-        mode = self.config.get('training_mode')
+        mode = self.config.get('training_mode')  # Should be 'long' or 'short'
         env = TradingEnvironment(price_data, indicators, initial_capital=initial_capital, transaction_cost=transaction_cost, mode=mode)
         return env
 
@@ -234,15 +226,8 @@ class GeneticOptimizer:
         if individual_params is None:
             total_params = self.get_total_parameters()
             varbound, vartypes = self.get_varbound_and_vartype()
-            individual = []
-            for idx in range(total_params):
-                low, high = varbound[idx]
-                vt = vartypes[idx][0]
-                if vt == 'int':
-                    val = np.random.randint(low, high+1)
-                else:
-                    val = np.random.uniform(low, high)
-                individual.append(val)
+            individual = np.random.uniform(varbound[:, 0], varbound[:, 1]).tolist()
+            # Alternatively, handle integer and real types accordingly
         else:
             individual = individual_params
         fitness = self.evaluate(individual)

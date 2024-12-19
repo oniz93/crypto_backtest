@@ -53,14 +53,13 @@ class DQNAgent:
         if len(self.buffer) < self.batch_size:
             return
         batch = np.random.choice(len(self.buffer), self.batch_size, replace=False)
-        states, actions, rewards, next_states, dones = [],[],[],[],[]
-        for idx in batch:
-            s,a,r,ns,d = self.buffer[idx]
-            states.append(s)
-            actions.append(a)
-            rewards.append(r)
-            next_states.append(ns)
-            dones.append(d)
+        batch_samples = [self.buffer[idx] for idx in batch]
+        states, actions, rewards, next_states, dones = zip(*batch_samples)
+
+        states = np.array(states)
+        next_states = np.array(next_states)
+
+        # print(f"Batch States Shape: {states.shape}, Expected: ({self.batch_size}, {self.state_dim})")
 
         states_t = torch.FloatTensor(states)
         actions_t = torch.LongTensor(actions).unsqueeze(1)

@@ -10,6 +10,7 @@ class TradingEnvironment:
         self.initial_capital = initial_capital
         self.transaction_cost = transaction_cost
         self.max_steps = max_steps
+        self.mode = mode
 
         # Merge price_data and indicators
         self.data = price_data.join(indicators, how='inner').dropna()
@@ -17,12 +18,11 @@ class TradingEnvironment:
         self.timestamps = self.data.index
         self.n_steps = len(self.data)
 
-        self.action_space = 3  # 0: hold, 1: buy, 2: sell
-        self.state_dim = self.data.shape[1] + 2  # indicators + position info
-        # position info could be: current inventory (0 or 1 if holding), and available capital ratio
-        self.mode = mode
-        self.entry_price = 0.0  # Track price at which current position was initiated
+        # Define action_dim and state_dim
+        self.action_dim = 3  # 0: hold, 1: buy, 2: sell
+        self.state_dim = self.data.shape[1] + 3  # indicators + inventory + cash_ratio + entry_price
 
+        self.entry_price = 0.0  # Track price at which current position was initiated
         self.reset()
 
     def reset(self):
@@ -35,23 +35,23 @@ class TradingEnvironment:
 
     def _get_state(self):
         row = self.data.iloc[self.current_step].values
-        # If state was (row + [inventory, cash_ratio]), now add entry_price info:
+        # State: indicators + [inventory, cash_ratio, entry_price]
         return np.concatenate([row, [self.inventory, self.cash / self.initial_capital, self.entry_price]])
 
     def step(self, action):
         current_price = self.data['close'].iloc[self.current_step]
         portfolio_before = self.cash + self.inventory * current_price
 
-        # If mode == "long":
+        # Mode-specific actions
         if self.mode == "long":
-            if action == 1: # Buy
+            if action == 1:  # Buy
                 if self.inventory == 0:
                     qty = self.cash / current_price
                     qty_after_cost = qty * (1 - self.transaction_cost)
                     self.inventory = qty_after_cost
                     self.cash = 0.0
                     self.entry_price = current_price
-            elif action == 2: # Sell (close long)
+            elif action == 2:  # Sell (close long)
                 if self.inventory > 0:
                     proceeds = self.inventory * current_price
                     proceeds_after_cost = proceeds * (1 - self.transaction_cost)
@@ -59,25 +59,18 @@ class TradingEnvironment:
                     self.inventory = 0.0
                     self.entry_price = 0.0
 
-        # If mode == "short":
         elif self.mode == "short":
-            # Here, action 1 might mean initiate short, action 2 means cover short.
-            if action == 1: # "Sell" to go short
+            if action == 1:  # Sell to go short
                 if self.inventory == 0:
-                    # Going short: no cash changes if you treat no margin?
-                    # Or you handle margin logic. For simplicity:
-                    qty = (self.cash / current_price)
+                    qty = self.cash / current_price
                     qty_after_cost = qty * (1 - self.transaction_cost)
-                    self.inventory = -qty_after_cost  # negative inventory means short
+                    self.inventory = -qty_after_cost  # Negative inventory indicates a short position
                     self.entry_price = current_price
-            elif action == 2: # "Buy" to cover short
+            elif action == 2:  # Buy to cover short
                 if self.inventory < 0:
                     cost_to_cover = abs(self.inventory) * current_price
                     cost_after_cost = cost_to_cover * (1 + self.transaction_cost)
-                    # deduct from cash
                     self.cash -= cost_after_cost
-                    # Check if going negative is allowed or if you must have margin logic
-                    # For simplicity, assume you had margin:
                     self.inventory = 0.0
                     self.entry_price = 0.0
 
@@ -89,4 +82,3 @@ class TradingEnvironment:
 
         next_state = self._get_state() if not done else np.zeros_like(self._get_state())
         return next_state, reward, done, {}
-
