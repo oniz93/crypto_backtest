@@ -6,11 +6,31 @@ from geneticalgorithm import geneticalgorithm as ga
 import os
 import json
 import pandas as pd
+import logging  # Import logging module
 
 from src.config_loader import Config
 from src.rl_environment import TradingEnvironment
 from src.rl_agent import DQNAgent
 
+# Configure logging
+logger = logging.getLogger('GeneticOptimizer')
+logger.setLevel(logging.DEBUG)  # Capture all levels of logs
+
+# Create handlers
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)  # Adjust as needed
+
+file_handler = logging.FileHandler('genetic_optimizer.log')
+file_handler.setLevel(logging.DEBUG)  # Detailed logs go to the file
+
+# Create formatters and add them to handlers
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+file_handler.setFormatter(formatter)
+
+# Add handlers to the logger
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
 
 class GeneticOptimizer:
     def __init__(self, data_loader, indicators_dir='precalculated_indicators_parquet', checkpoint_dir='checkpoints', checkpoint_file=None):
@@ -161,7 +181,7 @@ class GeneticOptimizer:
         """
         agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3)
         total_rewards = []
-        for ep in range(episodes):
+        for ep in range(1, episodes + 1):
             state = env.reset()
             done = False
             ep_reward = 0.0
@@ -173,7 +193,9 @@ class GeneticOptimizer:
                 state = next_state
                 ep_reward += reward
             total_rewards.append(ep_reward)
+            logger.info(f"RL Training - Episode {ep}/{episodes} - Episode Reward: {ep_reward}")
         avg_reward = np.mean(total_rewards)
+        logger.info(f"RL Training - Average Reward over {episodes} episodes: {avg_reward}")
         return agent, avg_reward
 
     def evaluate(self, individual, n_evaluations=1, rl_episodes=10):
@@ -189,11 +211,11 @@ class GeneticOptimizer:
         features_df = self.prepare_features(indicators)
 
         if len(features_df) < 100:
-            print("Not enough data to run RL.")
+            logger.warning("Not enough data to run RL.")
             return 0
 
         if 'close' not in features_df.columns:
-            print("'close' column missing in features_df.")
+            logger.error("'close' column missing in features_df.")
             return 0
 
         price_data = features_df[['close']]
@@ -201,18 +223,24 @@ class GeneticOptimizer:
 
         env = self.create_environment(price_data, indicators_only)
 
+        # Log individual parameters
+        logger.debug(f"Evaluating Individual Parameters: {config}")
+
         # Run RL training
         agent, avg_profit = self.run_rl_training(env, episodes=rl_episodes)
 
+        # Log fitness
+        logger.debug(f"Individual Fitness (Negative Avg Profit): {-avg_profit}")
+
         # Since GA's evaluate function expects a fitness value, return -avg_profit
-        # Negative because GA maximizes the function by default
+        # Negative because GA minimizes, but we want to maximize profit
         return -avg_profit
 
     def create_environment(self, price_data, indicators):
         # Create TradingEnvironment instance
         initial_capital = 100000
         transaction_cost = 0.001
-        mode = self.config.get('training_mode')  # Should be 'long' or 'short'
+        mode = self.config.get('training_mode', 'long')  # Should be 'long' or 'short'
         env = TradingEnvironment(price_data, indicators, initial_capital=initial_capital, transaction_cost=transaction_cost, mode=mode)
         return env
 
@@ -228,8 +256,11 @@ class GeneticOptimizer:
             'crossover_type': 'two_point',
             'max_iteration_without_improv': 1000,
             'multiprocessing_ncpus': multiprocessing.cpu_count(),
-            'multiprocessing_engine': None
+            'multiprocessing_engine': None,
+            # 'callback_generation': self.generation_callback  # Uncomment if supported
         }
+
+        logger.info("Starting Genetic Algorithm Optimization")
 
         model = ga(
             function=self.evaluate,
@@ -240,13 +271,17 @@ class GeneticOptimizer:
             algorithm_parameters=algorithm_param
         )
 
+        # Run the GA
         model.run()
+
+        logger.info("Genetic Algorithm Optimization Completed")
 
         # After GA run, get the best individual
         best_individual = model.output_dict['variable']
         best_fitness = model.output_dict['function']
 
-        print(f"Best Individual Fitness: {-best_fitness}")
+        logger.info(f"Best Individual Fitness: {-best_fitness}")
+        logger.debug(f"Best Individual Parameters: {self.extract_config_from_individual(best_individual)}")
 
         # Extract config
         best_config = self.extract_config_from_individual(best_individual)
@@ -256,11 +291,11 @@ class GeneticOptimizer:
         features_df = self.prepare_features(indicators)
 
         if len(features_df) < 100:
-            print("Not enough data to run RL for the best individual.")
+            logger.warning("Not enough data to run RL for the best individual.")
             return
 
         if 'close' not in features_df.columns:
-            print("'close' column missing in features_df.")
+            logger.error("'close' column missing in features_df.")
             return
 
         price_data = features_df[['close']]
@@ -272,23 +307,22 @@ class GeneticOptimizer:
         # Run RL training for the best individual
         agent, avg_profit = self.run_rl_training(env, episodes=10)
 
-        print(f"Average Profit from RL Training: {avg_profit}")
+        logger.info(f"Average Profit from RL Training: {avg_profit}")
 
         # Save the RL agent's weights
-        best_agent_path = os.path.join(self.checkpoint_dir, f'best_agent_gen_{model.current_iteration}.pth') if hasattr(model,
-                                                                                                                        'current_iteration') else os.path.join(
-            self.checkpoint_dir, 'best_agent.pth')
+        current_iteration = model.current_iteration if hasattr(model, 'current_iteration') else 'final'
+        best_agent_path = os.path.join(self.checkpoint_dir, f'best_agent_gen_{current_iteration}.pth')
         agent.save(best_agent_path)
-        print(f"Saved RL agent's weights to {best_agent_path}")
+        logger.info(f"Saved RL agent's weights to {best_agent_path}")
 
         # Save checkpoint
         self.save_checkpoint(
-            generation=model.current_iteration if hasattr(model, 'current_iteration') else 0,
+            generation=current_iteration,
             best_config=best_config,
             best_fitness=best_fitness,
             best_agent_path=best_agent_path
         )
-        print(f"Saved checkpoint to {os.path.join(self.checkpoint_dir, 'ga_checkpoint.json')}")
+        logger.info(f"Saved checkpoint to {os.path.join(self.checkpoint_dir, 'ga_checkpoint.json')}")
 
     def test_individual(self, individual_params=None):
         if individual_params is None:
@@ -297,7 +331,7 @@ class GeneticOptimizer:
             individual = []
             for idx in range(total_params):
                 low, high = varbound[idx]
-                vt = vartype[idx][0]
+                vt = vartypes[idx][0]
                 if vt == 'int':
                     val = int(np.random.randint(low, high + 1))
                 else:
@@ -306,7 +340,7 @@ class GeneticOptimizer:
         else:
             individual = individual_params
         fitness = self.evaluate(individual)
-        print(f"Fitness of the test individual: {fitness}")
+        logger.info(f"Test Individual Fitness: {fitness}")
         return fitness
 
     def save_checkpoint(self, generation, best_config, best_fitness, best_agent_path):
@@ -319,7 +353,7 @@ class GeneticOptimizer:
         checkpoint_file = os.path.join(self.checkpoint_dir, 'ga_checkpoint.json')
         with open(checkpoint_file, 'w') as f:
             json.dump(checkpoint_data, f)
-        print(f"Checkpoint saved to {checkpoint_file}")
+        logger.info(f"Checkpoint saved to {checkpoint_file}")
 
     def load_checkpoint(self, checkpoint_file):
         with open(checkpoint_file, 'r') as f:
@@ -329,9 +363,9 @@ class GeneticOptimizer:
         best_fitness = checkpoint_data.get('best_individual_fitness')
         best_agent_path = checkpoint_data.get('best_agent_path')
 
-        print(f"Loaded checkpoint from generation {generation}")
-        print(f"Best individual fitness: {-best_fitness}")
-        print(f"Best agent weights path: {best_agent_path}")
+        logger.info(f"Loaded checkpoint from generation {generation}")
+        logger.info(f"Best individual fitness: {-best_fitness}")
+        logger.info(f"Best agent weights path: {best_agent_path}")
 
         # Optionally, load the RL agent's weights
         if best_agent_path and os.path.exists(best_agent_path):
@@ -341,9 +375,9 @@ class GeneticOptimizer:
             agent = DQNAgent(state_dim=state_dim, action_dim=action_dim, lr=1e-3)
             agent.load(best_agent_path)
             self.loaded_best_agent = agent
-            print("Loaded best RL agent's weights.")
+            logger.info("Loaded best RL agent's weights.")
         else:
-            print(f"Best agent weights file {best_agent_path} not found.")
+            logger.error(f"Best agent weights file {best_agent_path} not found.")
 
         # Note: Restoring the GA's population and state is not supported by the 'geneticalgorithm' package.
         # If you need to resume the GA, you may need to implement a custom GA loop or use a different library.

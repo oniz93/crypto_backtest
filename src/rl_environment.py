@@ -2,6 +2,9 @@
 
 import numpy as np
 import pandas as pd
+import logging
+
+logger = logging.getLogger('GeneticOptimizer')
 
 class TradingEnvironment:
     def __init__(self, price_data, indicators, mode="long", initial_capital=100000, transaction_cost=0.001, max_steps=100000000):
@@ -31,14 +34,21 @@ class TradingEnvironment:
         self.cash = self.initial_capital
         self.inventory = 0
         self.last_price = self.data['close'].iloc[self.current_step]
+        logger.debug(f"Environment reset. Starting at step {self.current_step}.")
         return self._get_state()
 
-    def _get_state(self):
-        row = self.data.iloc[self.current_step].values
+    def _get_state(self, step=None):
+        if step is None:
+            step = self.current_step
+        if step < 0 or step >= self.n_steps:
+            logger.error(f"Attempted to access step {step}, which is out of bounds.")
+            raise IndexError("Step is out of bounds in _get_state.")
+        row = self.data.iloc[step].values
         # State: indicators + [inventory, cash_ratio, entry_price]
         return np.concatenate([row, [self.inventory, self.cash / self.initial_capital, self.entry_price]])
 
     def step(self, action):
+        # Access current price
         current_price = self.data['close'].iloc[self.current_step]
         portfolio_before = self.cash + self.inventory * current_price
 
@@ -51,6 +61,7 @@ class TradingEnvironment:
                     self.inventory = qty_after_cost
                     self.cash = 0.0
                     self.entry_price = current_price
+                    logger.debug(f"Action Buy executed. Inventory: {self.inventory}, Entry Price: {self.entry_price}")
             elif action == 2:  # Sell (close long)
                 if self.inventory > 0:
                     proceeds = self.inventory * current_price
@@ -58,7 +69,7 @@ class TradingEnvironment:
                     self.cash += proceeds_after_cost
                     self.inventory = 0.0
                     self.entry_price = 0.0
-
+                    logger.debug(f"Action Sell executed. Cash: {self.cash}")
         elif self.mode == "short":
             if action == 1:  # Sell to go short
                 if self.inventory == 0:
@@ -66,6 +77,7 @@ class TradingEnvironment:
                     qty_after_cost = qty * (1 - self.transaction_cost)
                     self.inventory = -qty_after_cost  # Negative inventory indicates a short position
                     self.entry_price = current_price
+                    logger.debug(f"Action Short Sell executed. Inventory: {self.inventory}, Entry Price: {self.entry_price}")
             elif action == 2:  # Buy to cover short
                 if self.inventory < 0:
                     cost_to_cover = abs(self.inventory) * current_price
@@ -73,12 +85,38 @@ class TradingEnvironment:
                     self.cash -= cost_after_cost
                     self.inventory = 0.0
                     self.entry_price = 0.0
+                    logger.debug(f"Action Cover Short executed. Cash: {self.cash}")
 
-        self.current_step += 1
-        done = self.current_step >= self.n_steps or self.current_step >= self.max_steps
-        new_price = self.data['close'].iloc[self.current_step] if not done else current_price
-        portfolio_after = self.cash + self.inventory * new_price
-        reward = portfolio_after - portfolio_before
+        # Determine if the next step will be out-of-bounds
+        next_step = self.current_step + 1
+        done = next_step >= self.n_steps or next_step >= self.max_steps
 
-        next_state = self._get_state() if not done else np.zeros_like(self._get_state())
+        if not done:
+            # Access new price if not done
+            try:
+                new_price = self.data['close'].iloc[next_step]
+            except IndexError:
+                logger.error(f"Attempted to access step {next_step}, which is out of bounds.")
+                done = True
+                new_price = self.data['close'].iloc[self.current_step]
+            portfolio_after = self.cash + self.inventory * new_price
+            reward = portfolio_after - portfolio_before
+            try:
+                next_state = self._get_state(next_step)
+            except IndexError:
+                logger.error(f"Failed to get next state for step {next_step}. Setting to zeros.")
+                next_state = np.zeros(self.state_dim)
+        else:
+            # If done, use the last valid price and set next_state to zeros
+            new_price = self.data['close'].iloc[self.current_step]
+            portfolio_after = self.cash + self.inventory * new_price
+            reward = portfolio_after - portfolio_before
+            next_state = np.zeros(self.state_dim)
+            logger.debug("Reached end of data. Setting next_state to zeros.")
+
+        # Update the current step
+        self.current_step = next_step
+
+        logger.debug(f"Step: {self.current_step} - Reward: {reward} - Done: {done}")
+
         return next_state, reward, done, {}
