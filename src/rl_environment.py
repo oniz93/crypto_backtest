@@ -9,7 +9,7 @@ logger = logging.getLogger('GeneticOptimizer')
 
 
 class TradingEnvironment:
-    def __init__(self, price_data, indicators, mode="long", initial_capital=100000, transaction_cost=0.005, max_steps=1000000):
+    def __init__(self, price_data, indicators, mode="long", initial_capital=100000, transaction_cost=0.005, max_steps=100000):
         self.price_data = price_data
         self.indicators = indicators
         self.initial_capital = initial_capital

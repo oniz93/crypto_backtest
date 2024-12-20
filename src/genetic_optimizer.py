@@ -260,7 +260,7 @@ class GeneticOptimizer:
 
         # Setup multiprocessing with initializer
         # Pass self and the global data
-        pool = multiprocessing.Pool(initializer=init_worker, initargs=(self, self.indicators, self.model_params, self.parameter_indices))
+        pool = multiprocessing.Pool(initializer=init_worker, initargs=(self, self.indicators, self.model_params, self.parameter_indices), processes=20)
         self.toolbox.register("map", pool.map)
 
         self.toolbox.register("mate", tools.cxTwoPoint)
@@ -268,7 +268,9 @@ class GeneticOptimizer:
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
     def run(self):
-        pop = self.toolbox.population(n=20)
+        # Create initial population of 1000
+        initial_pop_size = 1000
+        pop = self.toolbox.population(n=initial_pop_size)
         NGEN = 100
         CXPB = 0.5
         MUTPB = 0.1
@@ -281,10 +283,16 @@ class GeneticOptimizer:
             ind.avg_profit = avg_profit
             ind.agent = agent
 
+        # Now we start evolving over generations
         for gen in range(1, NGEN + 1):
             logger.info(f"=== Generation {gen} ===")
 
-            offspring = self.toolbox.select(pop, len(pop))
+            # From the second generation onward, we want to have only 100 individuals
+            desired_pop_size = 100 if gen > 1 else 1000
+
+            # Select the top desired_pop_size individuals
+            # If gen == 1, we are selecting from the initial pop of 1000
+            offspring = self.toolbox.select(pop, desired_pop_size)
             offspring = list(map(self.toolbox.clone, offspring))
 
             for child1, child2 in zip(offspring[::2], offspring[1::2]):
