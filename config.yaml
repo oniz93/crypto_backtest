@@ -1,5 +1,5 @@
 start_simulation: 2023-06-01
-end_simulation: 2023-07-31
+end_simulation: 2023-06-30
 start_cutoff: 2022-01-01
 end_cutoff: 2023-07-31
 training_mode: "long"
