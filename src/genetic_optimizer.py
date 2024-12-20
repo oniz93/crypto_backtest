@@ -173,7 +173,8 @@ class GeneticOptimizer:
                 df = df.reindex(features_df.index, method='ffill').add_suffix(f'_{indicator_name}')
                 features_df = features_df.join(df)
         features_df.dropna(inplace=True)
-        return features_df
+
+        return self.data_loader.filter_data_by_date(features_df, self.config.get('start_simulation'), self.config.get('end_simulation'))
 
     def extract_config_from_individual(self, individual):
         config = {}
@@ -221,7 +222,7 @@ class GeneticOptimizer:
 
     def create_environment(self, price_data, indicators):
         initial_capital = 100000
-        transaction_cost = 0.001
+        transaction_cost = 0.005
         mode = self.config.get('training_mode')
         env = TradingEnvironment(price_data, indicators, initial_capital=initial_capital, transaction_cost=transaction_cost, mode=mode)
         return env
@@ -241,6 +242,8 @@ class GeneticOptimizer:
                 state = next_state
                 ep_reward += reward
             total_rewards.append(ep_reward)
+            logger.info(f"One training done. Reward: {best_reward}")
+
         avg_reward = np.mean(total_rewards)
         return agent, avg_reward
 
