@@ -1,9 +1,11 @@
 import os
-import pandas as pd
-import pyarrow.parquet as pq
-import pyarrow as pa
 from glob import glob
+
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from tqdm import tqdm
+
 
 def merge_funding_history(data_directory, output_file):
     """
@@ -65,6 +67,7 @@ def merge_funding_history(data_directory, output_file):
             print(f"Error saving to Parquet file: {e}")
     else:
         print("No data was read from the CSV files.")
+
 
 if __name__ == '__main__':
     data_directory = 'data/funding'  # Directory containing your CSV files

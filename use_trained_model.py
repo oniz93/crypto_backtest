@@ -1,10 +1,10 @@
 # use_trained_model.py
 
-import torch
 import numpy as np
-from src.rl_agent import QNetwork
+import torch
+
 from src.data_loader import DataLoader
-import pandas as pd
+from src.rl_agent import QNetwork
 
 # Suppose we know state_dim and action_dim from training.
 state_dim = 10  # This should match what was used during training
@@ -15,11 +15,13 @@ model = QNetwork(state_dim, action_dim)
 model.load_state_dict(torch.load('dqn_model.pth', map_location=torch.device('cpu')))
 model.eval()
 
+
 # No epsilon-greedy needed now. Just greedy action selection.
 def select_greedy_action(model, state):
     with torch.no_grad():
         q_values = model(torch.FloatTensor(state).unsqueeze(0))
     return q_values.argmax().item()
+
 
 # Now get current market data and compute indicators
 # In a live setting, replace this with live data feed logic

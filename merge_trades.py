@@ -1,6 +1,7 @@
-import pandas as pd
-import os
 import glob
+import os
+
+import pandas as pd
 
 
 def combine_csv_to_parquet(csv_folder: str, output_file: str):

@@ -1,6 +1,7 @@
 # main.py
 
 import argparse
+
 from src.data_loader import DataLoader
 from src.genetic_optimizer import GeneticOptimizer
 

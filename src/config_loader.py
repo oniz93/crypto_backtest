@@ -1,7 +1,9 @@
 # src/config_loader.py
 
-import yaml
 import os
+
+import yaml
+
 
 class Config:
     def __init__(self, config_path: str = 'config.yaml'):
@@ -9,11 +11,7 @@ class Config:
             raise FileNotFoundError(f"Configuration file {config_path} not found.")
         with open(config_path, 'r') as file:
             self.config = yaml.safe_load(file)
+            # self.config should now be a dictionary
 
-    def get(self, section: str, key: str = None):
-        if key:
-            return self.config.get(section, {}).get(key)
-        return self.config.get(section, {})
-
-    def __getattr__(self, item):
-        return self.config.get(item, None)
+    def get(self, key, default=None):
+        return self.config.get(key, default)

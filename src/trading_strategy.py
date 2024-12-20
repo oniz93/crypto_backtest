@@ -1,23 +1,19 @@
 # src/trading_strategy.py
 
-import pandas as pd
-import numpy as np
+import os
 import random
 import time
-import os
-import csv
-import json
 
-from datetime import datetime, timedelta, timezone
-from pandas import Timestamp
+import numexpr as ne
+import pandas as pd
 
+from src.config_loader import Config
 from src.data_loader import DataLoader
 from src.utils import (
     sat_to_usd, usd_to_sat, round_to_100, get_next_rebuy_pct,
-    protected_div, timestamp_to_datetime
+    timestamp_to_datetime
 )
-from src.config_loader import Config
-import numexpr as ne
+
 
 class TradingStrategy:
     def __init__(self, data_loader: DataLoader, config, model_buy, model_sell):
@@ -106,7 +102,8 @@ class TradingStrategy:
                     df = df.reindex(indicators_df.index, method='ffill').add_suffix(f'_{indicator_name}')
                     indicators_df = indicators_df.join(df)
             indicators_df.dropna(inplace=True)
-            features = indicators_df.drop(columns=['open','high','low','close','volume','future_return','buy_signal','sell_signal'], errors='ignore')
+            features = indicators_df.drop(columns=['open', 'high', 'low', 'close', 'volume', 'future_return', 'buy_signal', 'sell_signal'],
+                                          errors='ignore')
             return features
         else:
             return pd.DataFrame()

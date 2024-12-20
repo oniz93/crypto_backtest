@@ -1,6 +1,7 @@
-import pandas as pd
-import os
 import glob
+import os
+
+import pandas as pd
 
 
 def csv_to_parquet(csv_folder: str, output_directory: str):
@@ -43,8 +44,6 @@ def csv_to_parquet(csv_folder: str, output_directory: str):
                 print(f"Error writing to Parquet file: {e}")
         except Exception as e:
             print(f"Error reading {file}: {e}")
-
-
 
 
 if __name__ == "__main__":

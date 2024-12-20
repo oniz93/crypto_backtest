@@ -1,18 +1,20 @@
 # precalculate_indicators.py
 
-import os
-import pandas as pd
-from itertools import product
-from multiprocessing import Pool, cpu_count
-from functools import partial
-from tqdm import tqdm
 import json
+import os
+from functools import partial
+from itertools import product
+from multiprocessing import Pool
+
+import pandas as pd
+from tqdm import tqdm
 
 # Import DataLoader from your src module
 from src.data_loader import DataLoader
 
 # Global variable to hold the shared DataFrame
 shared_tick_data = None
+
 
 def init_worker(tick_data):
     """
@@ -21,6 +23,7 @@ def init_worker(tick_data):
     """
     global shared_tick_data
     shared_tick_data = tick_data
+
 
 def load_indicator_config(config_file: str) -> dict:
     """
@@ -35,6 +38,7 @@ def load_indicator_config(config_file: str) -> dict:
     with open(config_file, 'r') as f:
         indicators = json.load(f)
     return indicators
+
 
 def has_float_params(params: dict) -> bool:
     """
@@ -52,6 +56,7 @@ def has_float_params(params: dict) -> bool:
             if any(isinstance(val, float) for val in param_range):
                 return True
     return False
+
 
 def generate_parameter_combinations(params: dict, step: int = 5) -> list:
     """
@@ -87,6 +92,7 @@ def generate_parameter_combinations(params: dict, step: int = 5) -> list:
     combinations = [dict(zip(param_names, combo)) for combo in product(*param_values)]
     return combinations
 
+
 def create_filename(indicator_name: str, timeframe: str, params: dict) -> str:
     """
     Creates a filename based on the indicator name, timeframe, and parameters.
@@ -107,6 +113,7 @@ def create_filename(indicator_name: str, timeframe: str, params: dict) -> str:
     # Replace any spaces or special characters if necessary
     filename = filename.replace(" ", "_")
     return filename
+
 
 def calculate_and_save_all_timeframes(indicator_info: tuple, output_dir: str, timeframes: list):
     """
@@ -155,6 +162,7 @@ def calculate_and_save_all_timeframes(indicator_info: tuple, output_dir: str, ti
 
         except Exception as e:
             print(f"Error processing {indicator_name} with params {params} on {timeframe}: {e}")
+
 
 def main():
     # Configuration
@@ -208,6 +216,7 @@ def main():
         list(tqdm(pool.imap_unordered(worker, tasks, chunksize=10), total=len(tasks)))
 
     print("Precalculation of indicators completed.")
+
 
 if __name__ == "__main__":
     main()

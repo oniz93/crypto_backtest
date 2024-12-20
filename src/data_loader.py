@@ -1,12 +1,15 @@
 # src/data_loader.py
 
-import pandas as pd
-from pandas import DataFrame
 import os
-import numpy as np
-import pandas_ta as ta
 from typing import Dict, Any, Union
+
+import numpy as np
+import pandas as pd
+import pandas_ta as ta
+from pandas import DataFrame
+
 from src.config_loader import Config
+
 
 class DataLoader:
     def __init__(self):

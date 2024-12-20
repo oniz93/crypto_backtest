@@ -2,9 +2,8 @@
 
 from src.config_loader import Config
 from src.data_loader import DataLoader
-from src.rl_environment import TradingEnvironment
 from src.rl_agent import DQNAgent
-import numpy as np
+from src.rl_environment import TradingEnvironment
 
 # Load config
 config = Config()  # ensure config.yaml has start_cutoff,end_cutoff, etc.
@@ -18,7 +17,7 @@ data_loader.resample_data()
 # or you can do it inside environment creation.
 
 # Example: no indicators for simplicity
-indicators = data_loader.tick_data[data_loader.base_timeframe][['close']] # minimal indicators
+indicators = data_loader.tick_data[data_loader.base_timeframe][['close']]  # minimal indicators
 # or compute your indicators and join them here.
 
 price_data = data_loader.tick_data[data_loader.base_timeframe]

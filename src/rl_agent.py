@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+
 class QNetwork(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_size=64):
         super(QNetwork, self).__init__()
@@ -16,6 +17,7 @@ class QNetwork(nn.Module):
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         return self.fc3(x)
+
 
 class DQNAgent:
     def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99, epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01):
@@ -71,7 +73,7 @@ class DQNAgent:
             max_next_q = self.target_net(next_states_t).max(1)[0].unsqueeze(1)
             target = rewards_t + self.gamma * max_next_q * (1 - dones_t)
 
-        loss = ((q_values - target)**2).mean()
+        loss = ((q_values - target) ** 2).mean()
 
         self.optimizer.zero_grad()
         loss.backward()
