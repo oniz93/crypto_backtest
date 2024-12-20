@@ -17,18 +17,15 @@ from src.config_loader import Config
 from src.rl_agent import DQNAgent
 from src.rl_environment import TradingEnvironment
 
-# Configure logging
 logger = logging.getLogger('GeneticOptimizer')
 logger.setLevel(logging.DEBUG)
 
-# Console Handler
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# Named Pipe Handler
 pipe_path = '/tmp/genetic_optimizer_logpipe'
 if not os.path.exists(pipe_path):
     os.mkfifo(pipe_path)
@@ -42,43 +39,28 @@ try:
 except Exception as e:
     logger.error(f"Failed to open named pipe {pipe_path}: {e}")
 
-# Global variables for multiprocessing
 global_optimizer = None
 global_indicators = None
 global_model_params = None
 global_parameter_indices = None
 
-
 def init_worker(optimizer, indicators, model_params, parameter_indices):
-    """
-    Initializes each worker process with references.
-    """
     global global_optimizer, global_indicators, global_model_params, global_parameter_indices
     global_optimizer = optimizer
     global_indicators = indicators
     global_model_params = model_params
     global_parameter_indices = parameter_indices
 
-
 def eval_wrapper(individual):
-    """
-    Evaluates an individual using the global_optimizer instance.
-    """
     return global_optimizer.evaluate_individual(individual)
 
-
 def init_ind(icls):
-    """
-    Top-level function to initialize an individual.
-    Uses global_indicators, global_model_params, and global_parameter_indices.
-    """
     keys = list(global_parameter_indices.keys())
     ind = []
     for k in keys:
         if k[0] == 'model':
             low, high = global_model_params[k[1]]
         else:
-            # indicator param
             indicator_name, param_name, timeframe = k
             low, high = global_indicators[indicator_name][param_name]
         if isinstance(low, int):
@@ -88,7 +70,6 @@ def init_ind(icls):
         ind.append(val)
     return icls(ind)
 
-
 class GeneticOptimizer:
     def __init__(self, data_loader, indicators_dir='precalculated_indicators_parquet', checkpoint_dir='checkpoints', checkpoint_file=None):
         self.data_loader = data_loader
@@ -97,7 +78,6 @@ class GeneticOptimizer:
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.config = Config()
 
-        # Define parameter ranges from your indicators and model_params
         self.indicators = self.define_indicators()
         self.model_params = {
             'threshold_buy': (0.5, 0.9),
@@ -105,13 +85,25 @@ class GeneticOptimizer:
         }
         self.parameter_indices = self.create_parameter_indices()
 
-        # Prepare data
-        self.prepare_data()
+        # Load the trades file once
+        self.trades_df = pd.read_parquet('output_parquet/BTCUSDT-trades.parquet')
+        # Convert timestamp to datetime and set as index
+        self.trades_df['timestamp'] = pd.to_datetime(self.trades_df['timestamp'], unit='ns')
+        self.trades_df.set_index('timestamp', inplace=True)
+        self.trades_df.sort_index(inplace=True)
 
-        # Setup DEAP
+        # Rename price to close so environment expects 'close'
+        self.trades_df.rename(columns={'price': 'close'}, inplace=True)
+
+        # Filter by date if needed
+        start_cutoff = self.config.get('start_cutoff')
+        end_cutoff = self.config.get('end_cutoff')
+        if start_cutoff and end_cutoff:
+            self.trades_df = self.trades_df.loc[(self.trades_df.index >= pd.to_datetime(start_cutoff)) &
+                                                (self.trades_df.index <= pd.to_datetime(end_cutoff))]
+
         self.setup_deap()
 
-        # Load checkpoint if needed
         if checkpoint_file:
             self.load_checkpoint(checkpoint_file)
 
@@ -142,19 +134,14 @@ class GeneticOptimizer:
     def get_total_parameters(self):
         return len(self.parameter_indices)
 
-    def prepare_data(self):
-        base_tf = self.data_loader.base_timeframe
-        price_data = self.data_loader.tick_data[base_tf].copy()
-        self.base_price_data = price_data
-
     def load_indicators(self, config):
-        # Similar code as before
         indicator_params = config['indicator_params']
         indicators = {}
         for indicator_name, timeframes_params in indicator_params.items():
             indicators[indicator_name] = {}
             for timeframe, params in timeframes_params.items():
                 indicator_df = self.data_loader.calculate_indicator(indicator_name, params, timeframe)
+                # Resample to 1min
                 if timeframe != '1min':
                     shift_duration = pd.to_timedelta(timeframe)
                     indicator_df_shifted = indicator_df.copy()
@@ -166,14 +153,31 @@ class GeneticOptimizer:
         return indicators
 
     def prepare_features(self, indicators):
-        features_df = self.base_price_data.copy()
+        # Instead of merging indicators and trades_df, we keep them separate.
+        # We'll produce a minute-level indicators_df from them.
+
+        # Assume each indicator_data is already at 1min frequency or we can ensure it:
+        # Combine all indicators at 1min resolution into a single indicators_df
+        indicators_df_list = []
         for indicator_name, tf_dict in indicators.items():
             if '1min' in tf_dict:
-                df = tf_dict['1min']
-                df = df.reindex(features_df.index, method='ffill').add_suffix(f'_{indicator_name}')
-                features_df = features_df.join(df)
-        features_df.dropna(inplace=True)
-        return features_df
+                df = tf_dict['1min'].copy()
+                # df indexed by minute, no reindexing to seconds.
+                # Add suffix to columns to identify indicator
+                df = df.add_suffix(f'_{indicator_name}')
+                indicators_df_list.append(df)
+
+        if indicators_df_list:
+            indicators_df = indicators_df_list[0]
+            for df in indicators_df_list[1:]:
+                indicators_df = indicators_df.join(df, how='inner')
+            indicators_df.dropna(inplace=True)
+        else:
+            # No indicators, create empty DF with index matching at least trades_df floored to minute?
+            # or just None and handle in environment
+            indicators_df = pd.DataFrame()
+
+        return indicators_df
 
     def extract_config_from_individual(self, individual):
         config = {}
@@ -200,30 +204,30 @@ class GeneticOptimizer:
     def evaluate_individual(self, individual):
         config = self.extract_config_from_individual(individual)
         indicators = self.load_indicators(config)
-        features_df = self.prepare_features(indicators)
+        # Instead of prepare_features returning features_df, we now separate the logic:
+        indicators_df = self.prepare_features(indicators)  # minute-level indicators
+        # We still have self.trades_df at second-level
 
-        if len(features_df) < 100:
-            logger.warning("Not enough data to run RL.")
+        if len(self.trades_df) < 100:
+            logger.warning("Not enough trades data to run RL.")
             return (0.0,), 0.0, None
 
-        if 'close' not in features_df.columns:
-            logger.error("'close' column missing in features_df.")
+        if 'close' not in self.trades_df.columns:
+            logger.error("'close' column missing in trades_df.")
             return (0.0,), 0.0, None
 
-        price_data = features_df[['close']]
-        indicators_only = features_df.drop(columns=['close'], errors='ignore')
-
-        env = self.create_environment(price_data, indicators_only)
+        # Pass both trades_df (second-level) and indicators_df (minute-level) to environment
+        env = self.create_environment(self.trades_df[['close']], indicators_df)
 
         agent, avg_profit = self.run_rl_training(env, episodes=10)
-
         return (-avg_profit,), avg_profit, agent
 
-    def create_environment(self, price_data, indicators):
+    def create_environment(self, price_data, indicators_df):
         initial_capital = 100000
-        transaction_cost = 0.001
+        transaction_cost = 0.005
         mode = self.config.get('training_mode')
-        env = TradingEnvironment(price_data, indicators, initial_capital=initial_capital, transaction_cost=transaction_cost, mode=mode)
+        env = TradingEnvironment(price_data, indicators_df, initial_capital=initial_capital,
+                                 transaction_cost=transaction_cost, mode=mode)
         return env
 
     def run_rl_training(self, env, episodes=10):
@@ -248,7 +252,6 @@ class GeneticOptimizer:
         creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
         creator.create("Individual", list, fitness=creator.FitnessMin)
 
-        # Store references globally for init_ind
         global global_indicators, global_model_params, global_parameter_indices
         global_indicators = self.indicators
         global_model_params = self.model_params
@@ -258,9 +261,9 @@ class GeneticOptimizer:
         self.toolbox.register("individual", init_ind, creator.Individual)
         self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
 
-        # Setup multiprocessing with initializer
-        # Pass self and the global data
-        pool = multiprocessing.Pool(initializer=init_worker, initargs=(self, self.indicators, self.model_params, self.parameter_indices))
+        pool = multiprocessing.Pool(initializer=init_worker,
+                                    initargs=(self, self.indicators, self.model_params, self.parameter_indices),
+                                    processes=5)
         self.toolbox.register("map", pool.map)
 
         self.toolbox.register("mate", tools.cxTwoPoint)
@@ -268,7 +271,7 @@ class GeneticOptimizer:
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
     def run(self):
-        pop = self.toolbox.population(n=20)
+        pop = self.toolbox.population(n=100)
         NGEN = 100
         CXPB = 0.5
         MUTPB = 0.1
@@ -341,7 +344,6 @@ class GeneticOptimizer:
 
         logger.info("DEAP Optimization Completed")
 
-        # Close the pool
         self.toolbox.map.__self__.close()
         self.toolbox.map.__self__.join()
 
