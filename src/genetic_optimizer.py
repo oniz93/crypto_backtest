@@ -12,6 +12,7 @@ import sys
 import numpy as np
 import pandas as pd
 from deap import base, creator, tools
+from dask.distributed import Client
 
 from src.config_loader import Config
 from src.rl_agent import DQNAgent
@@ -62,9 +63,10 @@ def init_worker(optimizer, indicators, model_params, parameter_indices):
 
 def eval_wrapper(individual):
     """
-    Evaluates an individual using the global_optimizer instance.
+    Evaluates an individual using the global_optimizer instance (to be captured in closure).
     """
-    return global_optimizer.evaluate_individual(individual)
+    # This placeholder is overwritten by a closure inside GeneticOptimizer.setup_deap()
+    raise RuntimeError("eval_wrapper called before being replaced by dask_map_fn closure.")
 
 
 def init_ind(icls):
@@ -248,23 +250,52 @@ class GeneticOptimizer:
         return agent, avg_reward
 
     def setup_deap(self):
+        # Create the DEAP types
         creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
         creator.create("Individual", list, fitness=creator.FitnessMin)
 
-        # Store references globally for init_ind
-        global global_indicators, global_model_params, global_parameter_indices
-        global_indicators = self.indicators
-        global_model_params = self.model_params
-        global_parameter_indices = self.parameter_indices
+        # Create a client for Dask   # DASK-ADDED
+        self.client = Client()      # You can customize arguments like n_workers, etc.
 
+        # We'll define closures that capture `self`:
+        def init_ind_closure(icls):
+            """
+            Replaces the old init_ind, but uses self.indicators, self.model_params, self.parameter_indices.
+            """
+            keys = list(self.parameter_indices.keys())
+            ind = []
+            for k in keys:
+                if k[0] == 'model':
+                    low, high = self.model_params[k[1]]
+                else:
+                    indicator_name, param_name, timeframe = k
+                    low, high = self.indicators[indicator_name][param_name]
+                if isinstance(low, int):
+                    val = random.randint(low, high)
+                else:
+                    val = random.uniform(low, high)
+                ind.append(val)
+            return icls(ind)
+
+        def eval_wrapper_closure(individual):
+            """
+            Replaces old global eval_wrapper.
+            It calls `self.evaluate_individual` under the hood.
+            """
+            return self.evaluate_individual(individual)
+
+        # Now register them
         self.toolbox = base.Toolbox()
-        self.toolbox.register("individual", init_ind, creator.Individual)
+        self.toolbox.register("individual", init_ind_closure, creator.Individual)
         self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
 
-        # Setup multiprocessing with initializer
-        # Pass self and the global data
-        pool = multiprocessing.Pool(initializer=init_worker, initargs=(self, self.indicators, self.model_params, self.parameter_indices), processes=20)
-        self.toolbox.register("map", pool.map)
+        # DASK-based map function
+        def dask_map_fn(func, items):
+            futures = self.client.map(func, items)
+            return self.client.gather(futures)
+
+        # We use `eval_wrapper_closure` in the DEAP pipeline
+        self.toolbox.register("map", dask_map_fn)  # DASK-CHANGED
 
         self.toolbox.register("mate", tools.cxTwoPoint)
         self.toolbox.register("mutate", tools.mutGaussian, mu=0.0, sigma=0.1, indpb=0.1)
@@ -280,21 +311,20 @@ class GeneticOptimizer:
         current_datetime = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
 
         logger.info("Evaluating initial population...")
-        results = self.toolbox.map(eval_wrapper, pop)
+        # Actually, we can just do:
+        results = self.toolbox.map(self.evaluate_individual, pop)
+
         for ind, (fit, avg_profit, agent) in zip(pop, results):
             ind.fitness.values = fit
             ind.avg_profit = avg_profit
             ind.agent = agent
 
-        # Now we start evolving over generations
         for gen in range(1, NGEN + 1):
             logger.info(f"=== Generation {gen} ===")
 
-            # From the second generation onward, we want to have only 100 individuals
+            # From the second generation onward, we want only 100 individuals
             desired_pop_size = 100 if gen > 1 else 1000
 
-            # Select the top desired_pop_size individuals
-            # If gen == 1, we are selecting from the initial pop of 1000
             offspring = self.toolbox.select(pop, desired_pop_size)
             offspring = list(map(self.toolbox.clone, offspring))
 
@@ -302,6 +332,7 @@ class GeneticOptimizer:
                 if random.random() < CXPB:
                     self.toolbox.mate(child1, child2)
                     del child1.fitness.values, child2.fitness.values
+
             for mutant in offspring:
                 if random.random() < MUTPB:
                     self.toolbox.mutate(mutant)
@@ -309,7 +340,7 @@ class GeneticOptimizer:
 
             invalid_inds = [ind for ind in offspring if not ind.fitness.valid]
             logger.info(f"Evaluating {len(invalid_inds)} individuals...")
-            results = self.toolbox.map(eval_wrapper, invalid_inds)
+            results = self.toolbox.map(self.evaluate_individual, invalid_inds)  # DASK-based
             for ind, (fit, avg_profit, agent) in zip(invalid_inds, results):
                 ind.fitness.values = fit
                 ind.avg_profit = avg_profit
@@ -352,9 +383,8 @@ class GeneticOptimizer:
 
         logger.info("DEAP Optimization Completed")
 
-        # Close the pool
-        self.toolbox.map.__self__.close()
-        self.toolbox.map.__self__.join()
+        # Gracefully close the Dask client
+        self.client.close()
 
     def load_checkpoint(self, checkpoint_file):
         # Implement if needed
