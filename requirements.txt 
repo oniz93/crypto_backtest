@@ -1,0 +1,9 @@
+numpy
+torch
+pandas
+pandas_ta
+PyYAML
+numexpr
+deap
+pyarrow
+tqdm

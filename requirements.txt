@@ -1,8 +1,0 @@
-
-ccxtpro~=0.9.38
-numpy
-pandas
-pandas_ta
-matplotlib
-numexpr
-geneticalgorithm

@@ -216,7 +216,7 @@ class GeneticOptimizer:
 
         env = self.create_environment(price_data, indicators_only)
 
-        agent, avg_profit = self.run_rl_training(env, episodes=10)
+        agent, avg_profit = self.run_rl_training(env, episodes=50)
 
         return (-avg_profit,), avg_profit, agent
 
@@ -242,7 +242,7 @@ class GeneticOptimizer:
                 state = next_state
                 ep_reward += reward
             total_rewards.append(ep_reward)
-            logger.info(f"One training done. Reward: {best_reward}")
+            logger.info(f"One training done. Reward: {ep_reward}")
 
         avg_reward = np.mean(total_rewards)
         return agent, avg_reward
