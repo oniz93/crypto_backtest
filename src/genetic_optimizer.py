@@ -4,7 +4,6 @@ import datetime
 import gc
 import json
 import logging
-import multiprocessing
 import os
 import random
 import sys
@@ -13,22 +12,21 @@ import numpy as np
 import pandas as pd
 from deap import base, creator, tools
 
+import ray  # <-- NEW
 from src.config_loader import Config
 from src.rl_agent import DQNAgent
 from src.rl_environment import TradingEnvironment
 
-# Configure logging
 logger = logging.getLogger('GeneticOptimizer')
 logger.setLevel(logging.DEBUG)
 
-# Console Handler
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# Named Pipe Handler
+# Optional: You could remove or keep the Named Pipe Handler if you want logging to a pipe
 pipe_path = '/tmp/genetic_optimizer_logpipe'
 if not os.path.exists(pipe_path):
     os.mkfifo(pipe_path)
@@ -42,76 +40,57 @@ try:
 except Exception as e:
     logger.error(f"Failed to open named pipe {pipe_path}: {e}")
 
-# Global variables for multiprocessing
-global_optimizer = None
-global_indicators = None
-global_model_params = None
-global_parameter_indices = None
+# We'll remove the global variables used by multiprocessing.Pool
+# (global_optimizer, global_indicators, etc.)
 
 
-def init_worker(optimizer, indicators, model_params, parameter_indices):
+################################################################
+# 1) Ray Remote Function for Evaluate
+################################################################
+@ray.remote
+def ray_evaluate_individual(
+    pickled_class,  # a pickled GeneticOptimizer (or the minimal data it needs)
+    individual
+):
     """
-    Initializes each worker process with references.
+    Evaluate one individual using a 'GeneticOptimizer' or the relevant evaluate method.
+    We will reconstruct or call a method on the unpickled object or data.
     """
-    global global_optimizer, global_indicators, global_model_params, global_parameter_indices
-    global_optimizer = optimizer
-    global_indicators = indicators
-    global_model_params = model_params
-    global_parameter_indices = parameter_indices
+    # unpickle or just call the method
+    # If we pass the entire GeneticOptimizer object, we must ensure it is serializable.
+    # Alternatively, we pass only the needed data/functions.
+    # For simplicity, let's assume 'pickled_class' is a minimal wrapper.
 
-
-def eval_wrapper(individual):
-    """
-    Evaluates an individual using the global_optimizer instance.
-    """
-    return global_optimizer.evaluate_individual(individual)
-
-
-def init_ind(icls):
-    """
-    Top-level function to initialize an individual.
-    Uses global_indicators, global_model_params, and global_parameter_indices.
-    """
-    keys = list(global_parameter_indices.keys())
-    ind = []
-    for k in keys:
-        if k[0] == 'model':
-            low, high = global_model_params[k[1]]
-        else:
-            # indicator param
-            indicator_name, param_name, timeframe = k
-            low, high = global_indicators[indicator_name][param_name]
-        if isinstance(low, int):
-            val = random.randint(low, high)
-        else:
-            val = random.uniform(low, high)
-        ind.append(val)
-    return icls(ind)
+    return pickled_class.evaluate_individual(individual)
 
 
 class GeneticOptimizer:
-    def __init__(self, data_loader, indicators_dir='precalculated_indicators_parquet', checkpoint_dir='checkpoints', checkpoint_file=None):
+    def __init__(
+        self,
+        data_loader,
+        indicators_dir='precalculated_indicators_parquet',
+        checkpoint_dir='checkpoints',
+        checkpoint_file=None
+    ):
         self.data_loader = data_loader
         self.indicators_dir = indicators_dir
         self.checkpoint_dir = checkpoint_dir
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.config = Config()
 
-        # Define parameter ranges from your indicators and model_params
+        # define indicators
         self.indicators = self.define_indicators()
         self.model_params = {
             'threshold_buy': (0.5, 0.9),
             'threshold_sell': (0.5, 0.9)
         }
         self.parameter_indices = self.create_parameter_indices()
-
-        # Prepare data
         self.prepare_data()
 
         # Setup DEAP
         self.setup_deap()
 
-        # Load checkpoint if needed
+        # Optionally load checkpoint
         if checkpoint_file:
             self.load_checkpoint(checkpoint_file)
 
@@ -139,16 +118,92 @@ class GeneticOptimizer:
             idx += 1
         return parameter_indices
 
-    def get_total_parameters(self):
-        return len(self.parameter_indices)
-
     def prepare_data(self):
         base_tf = self.data_loader.base_timeframe
-        price_data = self.data_loader.tick_data[base_tf].copy()
-        self.base_price_data = price_data
+        self.base_price_data = self.data_loader.tick_data[base_tf].copy()
+
+    def setup_deap(self):
+        creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+        creator.create("Individual", list, fitness=creator.FitnessMin)
+
+        self.toolbox = base.Toolbox()
+        # We don't need 'global' approach any more
+        self.toolbox.register("individual", self.init_ind, creator.Individual)
+        self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
+
+        # We'll still do normal mate/mutate/select
+        self.toolbox.register("mate", tools.cxTwoPoint)
+        self.toolbox.register("mutate", tools.mutGaussian, mu=0.0, sigma=0.1, indpb=0.1)
+        self.toolbox.register("select", tools.selTournament, tournsize=3)
+
+    def init_ind(self, icls):
+        """
+        Replaces 'init_ind' with a method that uses self.indicators, etc.
+        """
+        keys = list(self.parameter_indices.keys())
+        ind = []
+        for k in keys:
+            if k[0] == 'model':
+                low, high = self.model_params[k[1]]
+            else:
+                indicator_name, param_name, timeframe = k
+                low, high = self.indicators[indicator_name][param_name]
+            if isinstance(low, int):
+                val = random.randint(low, high)
+            else:
+                val = random.uniform(low, high)
+            ind.append(val)
+        return icls(ind)
+
+    ################################################################
+    # Evaluate logic
+    ################################################################
+    def evaluate_individual(self, individual):
+        """
+        The logic from the old evaluate_individual
+        """
+        config = self.extract_config_from_individual(individual)
+        indicators = self.load_indicators(config)
+        features_df = self.prepare_features(indicators)
+
+        if len(features_df) < 100:
+            logger.warning("Not enough data to run RL.")
+            return (0.0,), 0.0, None
+
+        if 'close' not in features_df.columns:
+            logger.error("'close' column missing in features_df.")
+            return (0.0,), 0.0, None
+
+        price_data = features_df[['close']]
+        indicators_only = features_df.drop(columns=['close'], errors='ignore')
+        env = self.create_environment(price_data, indicators_only)
+        agent, avg_profit = self.run_rl_training(env, episodes=50)
+
+        return (-avg_profit,), avg_profit, agent
+
+    def extract_config_from_individual(self, individual):
+        config = {}
+        indicator_params = {}
+        model_params = {}
+
+        keys = list(self.parameter_indices.keys())
+        for i, val in enumerate(individual):
+            key = keys[i]
+            if key[0] == 'model':
+                model_params[key[1]] = val
+            else:
+                indicator_name, param_name, timeframe = key
+                if indicator_name not in indicator_params:
+                    indicator_params[indicator_name] = {}
+                if timeframe not in indicator_params[indicator_name]:
+                    indicator_params[indicator_name][timeframe] = {}
+                indicator_params[indicator_name][timeframe][param_name] = val
+
+        config['indicator_params'] = indicator_params
+        config['model_params'] = model_params
+        return config
 
     def load_indicators(self, config):
-        # Similar code as before
         indicator_params = config['indicator_params']
         indicators = {}
         for indicator_name, timeframes_params in indicator_params.items():
@@ -173,61 +228,29 @@ class GeneticOptimizer:
                 df = df.reindex(features_df.index, method='ffill').add_suffix(f'_{indicator_name}')
                 features_df = features_df.join(df)
         features_df.dropna(inplace=True)
-
-        return self.data_loader.filter_data_by_date(features_df, self.config.get('start_simulation'), self.config.get('end_simulation'))
-
-    def extract_config_from_individual(self, individual):
-        config = {}
-        indicator_params = {}
-        model_params = {}
-
-        keys = list(self.parameter_indices.keys())
-        for i, val in enumerate(individual):
-            key = keys[i]
-            if key[0] == 'model':
-                model_params[key[1]] = val
-            else:
-                indicator_name, param_name, timeframe = key
-                if indicator_name not in indicator_params:
-                    indicator_params[indicator_name] = {}
-                if timeframe not in indicator_params[indicator_name]:
-                    indicator_params[indicator_name][timeframe] = {}
-                indicator_params[indicator_name][timeframe][param_name] = val
-
-        config['indicator_params'] = indicator_params
-        config['model_params'] = model_params
-        return config
-
-    def evaluate_individual(self, individual):
-        config = self.extract_config_from_individual(individual)
-        indicators = self.load_indicators(config)
-        features_df = self.prepare_features(indicators)
-
-        if len(features_df) < 100:
-            logger.warning("Not enough data to run RL.")
-            return (0.0,), 0.0, None
-
-        if 'close' not in features_df.columns:
-            logger.error("'close' column missing in features_df.")
-            return (0.0,), 0.0, None
-
-        price_data = features_df[['close']]
-        indicators_only = features_df.drop(columns=['close'], errors='ignore')
-
-        env = self.create_environment(price_data, indicators_only)
-
-        agent, avg_profit = self.run_rl_training(env, episodes=50)
-
-        return (-avg_profit,), avg_profit, agent
+        return self.data_loader.filter_data_by_date(
+            features_df,
+            self.config.get('start_simulation'),
+            self.config.get('end_simulation')
+        )
 
     def create_environment(self, price_data, indicators):
+        from src.rl_environment import TradingEnvironment
+        from src.config_loader import Config
+
         initial_capital = 100000
         transaction_cost = 0.005
         mode = self.config.get('training_mode')
-        env = TradingEnvironment(price_data, indicators, initial_capital=initial_capital, transaction_cost=transaction_cost, mode=mode)
-        return env
+        return TradingEnvironment(
+            price_data,
+            indicators,
+            initial_capital=initial_capital,
+            transaction_cost=transaction_cost,
+            mode=mode
+        )
 
     def run_rl_training(self, env, episodes=10):
+        from src.rl_agent import DQNAgent
         agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3)
         total_rewards = []
         for ep in range(episodes):
@@ -243,35 +266,13 @@ class GeneticOptimizer:
                 ep_reward += reward
             total_rewards.append(ep_reward)
             logger.info(f"One training done. Reward: {ep_reward}")
-
         avg_reward = np.mean(total_rewards)
         return agent, avg_reward
 
-    def setup_deap(self):
-        creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-        creator.create("Individual", list, fitness=creator.FitnessMin)
-
-        # Store references globally for init_ind
-        global global_indicators, global_model_params, global_parameter_indices
-        global_indicators = self.indicators
-        global_model_params = self.model_params
-        global_parameter_indices = self.parameter_indices
-
-        self.toolbox = base.Toolbox()
-        self.toolbox.register("individual", init_ind, creator.Individual)
-        self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
-
-        # Setup multiprocessing with initializer
-        # Pass self and the global data
-        pool = multiprocessing.Pool(initializer=init_worker, initargs=(self, self.indicators, self.model_params, self.parameter_indices), processes=20)
-        self.toolbox.register("map", pool.map)
-
-        self.toolbox.register("mate", tools.cxTwoPoint)
-        self.toolbox.register("mutate", tools.mutGaussian, mu=0.0, sigma=0.1, indpb=0.1)
-        self.toolbox.register("select", tools.selTournament, tournsize=3)
-
+    ################################################################
+    # The main GA run logic
+    ################################################################
     def run(self):
-        # Create initial population of 1000
         initial_pop_size = 1000
         pop = self.toolbox.population(n=initial_pop_size)
         NGEN = 100
@@ -280,21 +281,29 @@ class GeneticOptimizer:
         current_datetime = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
 
         logger.info("Evaluating initial population...")
-        results = self.toolbox.map(eval_wrapper, pop)
+
+        ################################################################
+        # 2) Use Ray to Evaluate
+        ################################################################
+        # We want to parallelize calls to self.evaluate_individual
+        # We'll do something like:
+        # tasks = [ray_evaluate_individual.remote(self, ind) for ind in pop]
+        # results = ray.get(tasks)
+
+        # But we must ensure 'self' is serializable or pass minimal data
+        tasks = [ray_evaluate_individual.remote(self, ind) for ind in pop]
+        results = ray.get(tasks)
+
         for ind, (fit, avg_profit, agent) in zip(pop, results):
             ind.fitness.values = fit
             ind.avg_profit = avg_profit
             ind.agent = agent
 
-        # Now we start evolving over generations
+        # standard GA loop
         for gen in range(1, NGEN + 1):
             logger.info(f"=== Generation {gen} ===")
-
-            # From the second generation onward, we want to have only 100 individuals
             desired_pop_size = 100 if gen > 1 else 1000
 
-            # Select the top desired_pop_size individuals
-            # If gen == 1, we are selecting from the initial pop of 1000
             offspring = self.toolbox.select(pop, desired_pop_size)
             offspring = list(map(self.toolbox.clone, offspring))
 
@@ -308,8 +317,10 @@ class GeneticOptimizer:
                     del mutant.fitness.values
 
             invalid_inds = [ind for ind in offspring if not ind.fitness.valid]
-            logger.info(f"Evaluating {len(invalid_inds)} individuals...")
-            results = self.toolbox.map(eval_wrapper, invalid_inds)
+            logger.info(f"Evaluating {len(invalid_inds)} individuals with Ray...")
+
+            tasks = [ray_evaluate_individual.remote(self, ind) for ind in invalid_inds]
+            results = ray.get(tasks)
             for ind, (fit, avg_profit, agent) in zip(invalid_inds, results):
                 ind.fitness.values = fit
                 ind.avg_profit = avg_profit
@@ -336,7 +347,6 @@ class GeneticOptimizer:
             best_agent = getattr(best_ind, 'agent', None)
 
             logger.info(f"Best Fitness: {best_fitness} | Best Reward: {best_reward}")
-
             if best_agent is not None:
                 os.makedirs('weights', exist_ok=True)
                 weight_file = f"weights/{current_datetime}-gen{gen}-best-{best_reward:.4f}.pth"
@@ -352,14 +362,8 @@ class GeneticOptimizer:
 
         logger.info("DEAP Optimization Completed")
 
-        # Close the pool
-        self.toolbox.map.__self__.close()
-        self.toolbox.map.__self__.join()
-
     def load_checkpoint(self, checkpoint_file):
-        # Implement if needed
         pass
 
     def test_individual(self, individual_params=None):
-        # Implement if needed
         pass
