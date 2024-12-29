@@ -4,6 +4,10 @@ import argparse
 
 from src.data_loader import DataLoader
 from src.genetic_optimizer import GeneticOptimizer
+from dask.distributed import Client, LocalCluster
+
+cluster = LocalCluster()
+client = Client(cluster.scheduler.address)
 
 
 def main():
@@ -17,7 +21,7 @@ def main():
     data_loader.resample_data()
 
     # Instantiate GeneticOptimizer with checkpoint if provided
-    optimizer = GeneticOptimizer(data_loader, checkpoint_file=args.checkpoint)
+    optimizer = GeneticOptimizer(data_loader, checkpoint_file=args.checkpoint, dask_client=client)
 
     # Run the genetic optimization
     optimizer.run()
