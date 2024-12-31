@@ -8,7 +8,9 @@ from src.genetic_optimizer import GeneticOptimizer
 
 def main():
     parser = argparse.ArgumentParser(description='Genetic Algorithm Optimizer for Trading Strategy')
-    parser.add_argument('--checkpoint', type=str, default=None, help='Path to checkpoint file to load')
+    parser.add_argument('--session_id', type=str, default=None, help='Session ID for this GA run')
+    parser.add_argument('--gen', type=int, default=None, help='Generation number from which to load population')
+
     args = parser.parse_args()
 
     # Load data
@@ -16,8 +18,12 @@ def main():
     data_loader.import_ticks()
     data_loader.resample_data()
 
-    # Instantiate GeneticOptimizer with checkpoint if provided
-    optimizer = GeneticOptimizer(data_loader, checkpoint_file=args.checkpoint)
+    # Instantiate GeneticOptimizer
+    optimizer = GeneticOptimizer(
+        data_loader,
+        session_id=args.session_id,
+        gen=args.gen
+    )
 
     # Run the genetic optimization
     optimizer.run()

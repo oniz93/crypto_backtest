@@ -45,7 +45,7 @@ except Exception as e:
 def ray_evaluate_individual(pickled_class, individual):
     """
     Evaluate one individual using a 'GeneticOptimizer' or the relevant evaluate method.
-    We will reconstruct or call a method on the unpickled object or data.
+    We call pickled_class.evaluate_individual(individual).
     """
     return pickled_class.evaluate_individual(individual)
 
@@ -55,10 +55,17 @@ class GeneticOptimizer:
         self,
         data_loader: DataLoader,
         session_id=None,
+        gen=None,
         indicators_dir='precalculated_indicators_parquet',
         checkpoint_dir='checkpoints',
         checkpoint_file=None
     ):
+        """
+        :param data_loader: DataLoader instance
+        :param session_id: string for the GA session
+        :param gen: if not None, load population from that generation
+                              else we minimize
+        """
         self.data_loader = data_loader
         self.indicators_dir = indicators_dir
         self.checkpoint_dir = checkpoint_dir
@@ -66,9 +73,8 @@ class GeneticOptimizer:
         self.config = Config()
 
         # Store the unique session_id for this entire training run
-        self.session_id = session_id
-        if not self.session_id:
-            self.session_id = "unknown-session"
+        self.session_id = session_id if session_id else "unknown-session"
+        self.gen = gen  # generation to load
 
         # define indicators
         self.indicators = self.define_indicators()
@@ -115,6 +121,8 @@ class GeneticOptimizer:
         self.base_price_data = self.data_loader.tick_data[base_tf].copy()
 
     def setup_deap(self):
+        # By default DEAP tries to *minimize* the fitness
+        # We'll keep that, but if we are maximizing, we invert sign in evaluate_individual
         creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
         creator.create("Individual", list, fitness=creator.FitnessMin)
 
@@ -128,7 +136,7 @@ class GeneticOptimizer:
 
     def init_ind(self, icls):
         """
-        Replaces 'init_ind' with a method that uses self.indicators, etc.
+        Creates a single individual with random parameters from the parameter range.
         """
         keys = list(self.parameter_indices.keys())
         ind = []
@@ -146,23 +154,31 @@ class GeneticOptimizer:
         return icls(ind)
 
     def evaluate_individual(self, individual):
+        """
+        Evaluate an individual:
+          - build config from the individual's parameters
+          - run RL training
+        """
         config = self.extract_config_from_individual(individual)
         indicators = self.load_indicators(config)
         features_df = self.prepare_features(indicators)
 
         if len(features_df) < 100:
             logger.warning("Not enough data to run RL.")
-            return (0.0,), 0.0, None
+            # For a short population, fitness is poor
+            return (9999999.0,), 0.0, None  # or large positive if we are minimizing
 
         if 'close' not in features_df.columns:
             logger.error("'close' column missing in features_df.")
-            return (0.0,), 0.0, None
+            return (9999999.0,), 0.0, None
 
         price_data = features_df[['close']]
         indicators_only = features_df.drop(columns=['close'], errors='ignore')
+
         env = self.create_environment(price_data, indicators_only)
         agent, avg_profit = self.run_rl_training(env, episodes=50)
 
+        # If we are maximizing profit, but GA is a minimizer => return negative
         return (-avg_profit,), avg_profit, agent
 
     def extract_config_from_individual(self, individual):
@@ -254,8 +270,11 @@ class GeneticOptimizer:
         return agent, avg_reward
 
     def run(self):
-        # We'll create initial population of 1000
-        initial_pop_size = 1000
+        """
+        If self.gen is not None, we load that population from file.
+        Otherwise, we create one from scratch.
+        Then we run NGEN steps.
+        """
         NGEN = 100
         CXPB = 0.5
         MUTPB = 0.1
@@ -263,8 +282,15 @@ class GeneticOptimizer:
         os.makedirs(f"population/{self.session_id}", exist_ok=True)
         os.makedirs(f"weights/{self.session_id}", exist_ok=True)
 
-        # Create population
-        pop = self.toolbox.population(n=initial_pop_size)
+        if self.gen is not None:
+            # load population from file
+            pop = self.load_population(self.session_id, self.gen)
+            if not pop:
+                # if it's empty or not found, fallback to generating
+                pop = self.toolbox.population(n=1000)
+        else:
+            # default create population
+            pop = self.toolbox.population(n=1000)
 
         logger.info("Evaluating initial population...")
 
@@ -276,10 +302,11 @@ class GeneticOptimizer:
             ind.avg_profit = avg_profit
             ind.agent = agent
 
-        # GA loop
         for gen in range(1, NGEN + 1):
             logger.info(f"=== Generation {gen} ===")
-            desired_pop_size = 1000 if gen > 1 else 10000
+
+            # after gen=1, we want 100 individuals, for example
+            desired_pop_size = 100 if gen > 1 else 1000
 
             offspring = self.toolbox.select(pop, desired_pop_size)
             offspring = list(map(self.toolbox.clone, offspring))
@@ -326,7 +353,7 @@ class GeneticOptimizer:
 
             logger.info(f"Best Fitness: {best_fitness} | Best Reward: {best_reward}")
 
-            # For each individual whose avg_profit > 100000, save weights
+            # Save RL agent if profit > 100000
             for ind_id, ind in enumerate(pop):
                 agent_to_save = getattr(ind, 'agent', None)
                 ind_profit = getattr(ind, 'avg_profit', 0)
@@ -364,16 +391,18 @@ class GeneticOptimizer:
         pop = []
         for item in population_data:
             params = item['parameters']  # list of floats
-            # create an individual
-            ind = creator.Individual(params)  # matches the "Individual" class from DEAP
-            # we can optionally reassign fitness or set them invalid
-            # if we want them to be reevaluated, we can just leave them without fitness
-            if 'fitness' in item:
-                fit_val = item['fitness']
-                # if you want them re-evaluated, skip setting it
-                # otherwise you could do:
-                # ind.fitness.values = (fit_val,)
+            ind = creator.Individual(params)
+            # We won't set fitness here => we'll re-evaluate
             pop.append(ind)
 
         logger.info(f"Loaded population of size {len(pop)} from {pop_file}")
         return pop
+
+    def load_checkpoint(self, checkpoint_file):
+        """
+        Stub: not implementing global resume from file here.
+        """
+        pass
+
+    def test_individual(self, individual_params=None):
+        pass

@@ -14,6 +14,9 @@ class QNetwork(nn.Module):
         self.fc3 = nn.Linear(hidden_size, action_dim)
 
     def forward(self, x):
+        # The RL agent is trying to MAXIMIZE reward internally.
+        # If we want to minimize from the GA perspective, the GA just inverts sign in evaluate_individual.
+        # So this code remains the same.
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         return self.fc3(x)
@@ -23,7 +26,7 @@ class DQNAgent:
     def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99, epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01):
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.gamma = gamma
+        self.gamma = gamma  # the agent tries to maximize discounted reward
         self.epsilon = epsilon
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
@@ -47,6 +50,7 @@ class DQNAgent:
         return q_values.argmax().item()
 
     def store_transition(self, state, action, reward, next_state, done):
+        # The agent is maximizing reward in this buffer
         self.buffer.append((state, action, reward, next_state, done))
         if len(self.buffer) > 10000:
             self.buffer.pop(0)
@@ -61,16 +65,18 @@ class DQNAgent:
         states = np.array(states)
         next_states = np.array(next_states)
 
-        # Convert to tensors efficiently
         states_t = torch.FloatTensor(states)
         actions_t = torch.LongTensor(actions).unsqueeze(1)
         rewards_t = torch.FloatTensor(rewards).unsqueeze(1)
         next_states_t = torch.FloatTensor(next_states)
         dones_t = torch.FloatTensor(dones).unsqueeze(1)
 
+        # Q(s, a)
         q_values = self.q_net(states_t).gather(1, actions_t)
+
         with torch.no_grad():
             max_next_q = self.target_net(next_states_t).max(1)[0].unsqueeze(1)
+            # Bellman update
             target = rewards_t + self.gamma * max_next_q * (1 - dones_t)
 
         loss = ((q_values - target) ** 2).mean()
@@ -83,7 +89,7 @@ class DQNAgent:
         if self.step_count % self.update_target_every == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
 
-        # Decay epsilon
+        # Decay epsilon over time
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
