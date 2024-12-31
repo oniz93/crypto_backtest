@@ -1,6 +1,7 @@
 # main.py
 
 import argparse
+import random
 
 from src.data_loader import DataLoader
 from src.genetic_optimizer import GeneticOptimizer
@@ -13,6 +14,11 @@ def main():
 
     args = parser.parse_args()
 
+    if args.session_id == None:
+        session = random.randint(100000, 999999)
+    else:
+        session = args.session_id
+
     # Load data
     data_loader = DataLoader()
     data_loader.import_ticks()
@@ -21,7 +27,7 @@ def main():
     # Instantiate GeneticOptimizer
     optimizer = GeneticOptimizer(
         data_loader,
-        session_id=args.session_id,
+        session_id=session,
         gen=args.gen
     )
 

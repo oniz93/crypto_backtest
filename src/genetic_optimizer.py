@@ -279,6 +279,8 @@ class GeneticOptimizer:
         CXPB = 0.5
         MUTPB = 0.1
 
+        INITIAL_POPULATION = 10000
+
         os.makedirs(f"population/{self.session_id}", exist_ok=True)
         os.makedirs(f"weights/{self.session_id}", exist_ok=True)
 
@@ -287,10 +289,10 @@ class GeneticOptimizer:
             pop = self.load_population(self.session_id, self.gen)
             if not pop:
                 # if it's empty or not found, fallback to generating
-                pop = self.toolbox.population(n=1000)
+                pop = self.toolbox.population(n=INITIAL_POPULATION)
         else:
             # default create population
-            pop = self.toolbox.population(n=1000)
+            pop = self.toolbox.population(n=INITIAL_POPULATION)
 
         logger.info("Evaluating initial population...")
 
@@ -306,7 +308,7 @@ class GeneticOptimizer:
             logger.info(f"=== Generation {gen} ===")
 
             # after gen=1, we want 100 individuals, for example
-            desired_pop_size = 100 if gen > 1 else 1000
+            desired_pop_size = 1000 if gen > 1 else INITIAL_POPULATION
 
             offspring = self.toolbox.select(pop, desired_pop_size)
             offspring = list(map(self.toolbox.clone, offspring))
