@@ -12,14 +12,14 @@ import numpy as np
 import pandas as pd
 from deap import base, creator, tools
 
-import ray  # <-- NEW
+import ray
 from src.config_loader import Config
-from src.rl_agent import DQNAgent
-from src.rl_environment import TradingEnvironment
+from src.data_loader import DataLoader
 
 logger = logging.getLogger('GeneticOptimizer')
 logger.setLevel(logging.DEBUG)
 
+# Console Handler
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -40,34 +40,21 @@ try:
 except Exception as e:
     logger.error(f"Failed to open named pipe {pipe_path}: {e}")
 
-# We'll remove the global variables used by multiprocessing.Pool
-# (global_optimizer, global_indicators, etc.)
 
-
-################################################################
-# 1) Ray Remote Function for Evaluate
-################################################################
 @ray.remote
-def ray_evaluate_individual(
-    pickled_class,  # a pickled GeneticOptimizer (or the minimal data it needs)
-    individual
-):
+def ray_evaluate_individual(pickled_class, individual):
     """
     Evaluate one individual using a 'GeneticOptimizer' or the relevant evaluate method.
     We will reconstruct or call a method on the unpickled object or data.
     """
-    # unpickle or just call the method
-    # If we pass the entire GeneticOptimizer object, we must ensure it is serializable.
-    # Alternatively, we pass only the needed data/functions.
-    # For simplicity, let's assume 'pickled_class' is a minimal wrapper.
-
     return pickled_class.evaluate_individual(individual)
 
 
 class GeneticOptimizer:
     def __init__(
         self,
-        data_loader,
+        data_loader: DataLoader,
+        session_id=None,
         indicators_dir='precalculated_indicators_parquet',
         checkpoint_dir='checkpoints',
         checkpoint_file=None
@@ -77,6 +64,11 @@ class GeneticOptimizer:
         self.checkpoint_dir = checkpoint_dir
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.config = Config()
+
+        # Store the unique session_id for this entire training run
+        self.session_id = session_id
+        if not self.session_id:
+            self.session_id = "unknown-session"
 
         # define indicators
         self.indicators = self.define_indicators()
@@ -127,11 +119,9 @@ class GeneticOptimizer:
         creator.create("Individual", list, fitness=creator.FitnessMin)
 
         self.toolbox = base.Toolbox()
-        # We don't need 'global' approach any more
         self.toolbox.register("individual", self.init_ind, creator.Individual)
         self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
 
-        # We'll still do normal mate/mutate/select
         self.toolbox.register("mate", tools.cxTwoPoint)
         self.toolbox.register("mutate", tools.mutGaussian, mu=0.0, sigma=0.1, indpb=0.1)
         self.toolbox.register("select", tools.selTournament, tournsize=3)
@@ -155,13 +145,7 @@ class GeneticOptimizer:
             ind.append(val)
         return icls(ind)
 
-    ################################################################
-    # Evaluate logic
-    ################################################################
     def evaluate_individual(self, individual):
-        """
-        The logic from the old evaluate_individual
-        """
         config = self.extract_config_from_individual(individual)
         indicators = self.load_indicators(config)
         features_df = self.prepare_features(indicators)
@@ -236,7 +220,6 @@ class GeneticOptimizer:
 
     def create_environment(self, price_data, indicators):
         from src.rl_environment import TradingEnvironment
-        from src.config_loader import Config
 
         initial_capital = 100000
         transaction_cost = 0.005
@@ -266,31 +249,25 @@ class GeneticOptimizer:
                 ep_reward += reward
             total_rewards.append(ep_reward)
             logger.info(f"One training done. Reward: {ep_reward}")
+
         avg_reward = np.mean(total_rewards)
         return agent, avg_reward
 
-    ################################################################
-    # The main GA run logic
-    ################################################################
     def run(self):
+        # We'll create initial population of 1000
         initial_pop_size = 1000
-        pop = self.toolbox.population(n=initial_pop_size)
         NGEN = 100
         CXPB = 0.5
         MUTPB = 0.1
-        current_datetime = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+
+        os.makedirs(f"population/{self.session_id}", exist_ok=True)
+        os.makedirs(f"weights/{self.session_id}", exist_ok=True)
+
+        # Create population
+        pop = self.toolbox.population(n=initial_pop_size)
 
         logger.info("Evaluating initial population...")
 
-        ################################################################
-        # 2) Use Ray to Evaluate
-        ################################################################
-        # We want to parallelize calls to self.evaluate_individual
-        # We'll do something like:
-        # tasks = [ray_evaluate_individual.remote(self, ind) for ind in pop]
-        # results = ray.get(tasks)
-
-        # But we must ensure 'self' is serializable or pass minimal data
         tasks = [ray_evaluate_individual.remote(self, ind) for ind in pop]
         results = ray.get(tasks)
 
@@ -299,10 +276,10 @@ class GeneticOptimizer:
             ind.avg_profit = avg_profit
             ind.agent = agent
 
-        # standard GA loop
+        # GA loop
         for gen in range(1, NGEN + 1):
             logger.info(f"=== Generation {gen} ===")
-            desired_pop_size = 100 if gen > 1 else 1000
+            desired_pop_size = 1000 if gen > 1 else 10000
 
             offspring = self.toolbox.select(pop, desired_pop_size)
             offspring = list(map(self.toolbox.clone, offspring))
@@ -311,6 +288,7 @@ class GeneticOptimizer:
                 if random.random() < CXPB:
                     self.toolbox.mate(child1, child2)
                     del child1.fitness.values, child2.fitness.values
+
             for mutant in offspring:
                 if random.random() < MUTPB:
                     self.toolbox.mutate(mutant)
@@ -318,9 +296,9 @@ class GeneticOptimizer:
 
             invalid_inds = [ind for ind in offspring if not ind.fitness.valid]
             logger.info(f"Evaluating {len(invalid_inds)} individuals with Ray...")
-
             tasks = [ray_evaluate_individual.remote(self, ind) for ind in invalid_inds]
             results = ray.get(tasks)
+
             for ind, (fit, avg_profit, agent) in zip(invalid_inds, results):
                 ind.fitness.values = fit
                 ind.avg_profit = avg_profit
@@ -328,8 +306,8 @@ class GeneticOptimizer:
 
             pop[:] = offspring
 
-            pop_file = f"population/{current_datetime}-gen{gen}.json"
-            os.makedirs('population', exist_ok=True)
+            # Save population to JSON
+            pop_file = f"population/{self.session_id}/gen{gen}.json"
             population_data = []
             for i, ind in enumerate(pop):
                 population_data.append({
@@ -347,11 +325,17 @@ class GeneticOptimizer:
             best_agent = getattr(best_ind, 'agent', None)
 
             logger.info(f"Best Fitness: {best_fitness} | Best Reward: {best_reward}")
-            if best_agent is not None:
-                os.makedirs('weights', exist_ok=True)
-                weight_file = f"weights/{current_datetime}-gen{gen}-best-{best_reward:.4f}.pth"
-                best_agent.save(weight_file)
-                logger.info(f"Saved RL agent's weights to {weight_file}")
+
+            # For each individual whose avg_profit > 100000, save weights
+            for ind_id, ind in enumerate(pop):
+                agent_to_save = getattr(ind, 'agent', None)
+                ind_profit = getattr(ind, 'avg_profit', 0)
+                if agent_to_save is not None and ind_profit > 100000:
+                    use_id = str(ind_id)
+                    use_profit = int(ind_profit)
+                    weight_file = f"weights/{self.session_id}/gen{gen}-{use_id}-{use_profit}.pth"
+                    agent_to_save.save(weight_file)
+                    logger.info(f"Saved RL agent's weights to {weight_file} because profit {ind_profit} > 100000")
 
             for ind in pop:
                 if hasattr(ind, 'agent'):
@@ -362,8 +346,34 @@ class GeneticOptimizer:
 
         logger.info("DEAP Optimization Completed")
 
-    def load_checkpoint(self, checkpoint_file):
-        pass
+    def load_population(self, session_id: str, generation_number: int):
+        """
+        Load a population from a saved JSON file under population/{session_id}/gen{generation_number}.json
+        and return a list of Individuals. The individuals will have their parameters set,
+        but fitness is cleared (they'll need re-evaluation).
+        """
+        pop_file = f"population/{session_id}/gen{generation_number}.json"
+        if not os.path.exists(pop_file):
+            logger.warning(f"Population file {pop_file} not found.")
+            return []
 
-    def test_individual(self, individual_params=None):
-        pass
+        with open(pop_file, 'r') as f:
+            population_data = json.load(f)
+
+        # We'll create an empty population of the right length
+        pop = []
+        for item in population_data:
+            params = item['parameters']  # list of floats
+            # create an individual
+            ind = creator.Individual(params)  # matches the "Individual" class from DEAP
+            # we can optionally reassign fitness or set them invalid
+            # if we want them to be reevaluated, we can just leave them without fitness
+            if 'fitness' in item:
+                fit_val = item['fitness']
+                # if you want them re-evaluated, skip setting it
+                # otherwise you could do:
+                # ind.fitness.values = (fit_val,)
+            pop.append(ind)
+
+        logger.info(f"Loaded population of size {len(pop)} from {pop_file}")
+        return pop

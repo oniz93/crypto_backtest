@@ -24,7 +24,6 @@ ITEMS=(
     "merge_funding_history.py"
     "merge_timeframe_files.py"
     "merge_trades.py"
-    "output_parquet"
     "precalculate_indicators.py"
     "printContent.sh"
     "requirements.txt"
@@ -35,13 +34,12 @@ ITEMS=(
 
 # Destination hosts
 HOSTS=(
-    "rpi0w"
+    "clusterctrl"
     "rpi3red"
-    "rpi1black"
     "rpi3nude"
-    "rpi1nude"
-    "rpi1tras"
     "rpi4"
+    "mbp"
+    "steamdeck"
 )
 
 # Maximum number of parallel jobs

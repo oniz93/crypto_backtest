@@ -1,7 +1,7 @@
 start_simulation: 2023-06-01
-end_simulation: 2023-06-02
+end_simulation: 2023-06-10
 start_cutoff: 2022-01-01
-end_cutoff: 2023-06-04
+end_cutoff: 2023-06-10
 training_mode: "long"
 PCT_QTY_ORDER: 0.1
 initial_balance: 100000
