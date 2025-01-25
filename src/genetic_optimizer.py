@@ -93,13 +93,18 @@ class GeneticOptimizer:
             self.load_checkpoint(checkpoint_file)
 
     def define_indicators(self):
+        # return {
+        #     'sma': {'length': (5, 200)},
+        #     'ema': {'length': (5, 200)},
+        #     'rsi': {'length': (5, 30)},
+        #     'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
+        #     'atr': {'length': (5, 50)},
+        #     'stoch': {'k': (5, 20), 'd': (3, 10)},
+        # }
         return {
-            'sma': {'length': (5, 200)},
-            'ema': {'length': (5, 200)},
-            'rsi': {'length': (5, 30)},
-            'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
-            'atr': {'length': (5, 50)},
-            'stoch': {'k': (5, 20), 'd': (3, 10)},
+            'vwap': {'offset': (0, 50)},
+            'vwma': {'length': (5, 200)},
+            'vpvr': {'width': (1, 200)},
         }
 
     def create_parameter_indices(self):
@@ -408,3 +413,43 @@ class GeneticOptimizer:
 
     def test_individual(self, individual_params=None):
         pass
+
+    def debug_single_individual(self, individual_params=None):
+        """
+        Debug a single individual WITHOUT using Ray or the GA loop.
+        Use this method to step through the code with breakpoints in your IDE.
+
+        :param individual_params: list of parameter values, same length as self.parameter_indices
+                                 or None => create random
+        """
+        from deap import creator
+
+        # 1) If not provided, create random parameters
+        if individual_params is None:
+            keys = list(self.parameter_indices.keys())
+            individual_params = []
+            for k in keys:
+                if k[0] == 'model':
+                    low, high = self.model_params[k[1]]
+                else:
+                    indicator_name, param_name, timeframe = k
+                    low, high = self.indicators[indicator_name][param_name]
+                if isinstance(low, int):
+                    val = random.randint(low, high)
+                else:
+                    val = random.uniform(low, high)
+                individual_params.append(val)
+
+        # 2) Create a DEAP Individual
+        ind = creator.Individual(individual_params)
+
+        # 3) Evaluate directly
+        logger.info("=== Debugging single individual ===")
+        fit, avg_profit, agent = self.evaluate_individual(ind)
+        logger.info(f"Evaluation finished. Fit: {fit}, Profit: {avg_profit}")
+        if agent is not None:
+            logger.info("An RL agent was created; you can place breakpoints inside run_rl_training or environment.")
+        else:
+            logger.info("No RL agent was created (possibly not enough data).")
+
+        return fit, avg_profit, agent

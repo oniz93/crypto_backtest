@@ -1,7 +1,9 @@
-numpy~=1.26.4
+numpy
 torch
-pandas~=2.2.3
-pandas_ta~=0.3.14b0
-PyYAML~=6.0.2
-deap~=1.4.1
-ray==2.40.0
+pandas
+pandas_ta
+PyYAML
+deap
+ray~=2.40.0
+fastparquet
+pyarrow
