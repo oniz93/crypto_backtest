@@ -104,21 +104,48 @@ class GeneticOptimizer:
         return {
             'vwap': {'offset': (0, 50)},
             'vwma': {'length': (5, 200)},
-            'vpvr': {'width': (1, 200)},
+            'vpvr': {
+                '1min':{'width': (1000, 50000)},
+                '5min':{'width': (200, 10000)},
+                '15min':{'width': (100, 3500)},
+                '30min':{'width': (50, 2000)},
+                '1h':{'width': (30, 1000)},
+                '4h':{'width': (10, 250)},
+                '1d':{'width': (10, 60)},
+            },
         }
 
     def create_parameter_indices(self):
         parameter_indices = {}
         idx = 0
         self.timeframes = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']
-        for indicator_name, params in self.indicators.items():
-            for param_name in params.keys():
-                for timeframe in self.timeframes:
-                    parameter_indices[(indicator_name, param_name, timeframe)] = idx
-                    idx += 1
+        for indicator_name, data in self.indicators.items():
+            # data might look like: {'offset': (0,50)}  OR  {'1min': {'width':(...), ...}, '5min': {...}}
+            if isinstance(data, dict):
+                # Check if ALL keys are recognized timeframes
+                # e.g. set(data.keys()) <= set(['1min','5min','15min',...])
+                if set(data.keys()).issubset(set(self.timeframes)):
+                    # => The user gave us per-timeframe params
+                    for tf, param_dict in data.items():
+                        # param_dict e.g. {'width': (1000,200000), ...}
+                        for param_name, (low, high) in param_dict.items():
+                            parameter_indices[(indicator_name, param_name, tf)] = idx
+                            idx += 1
+                else:
+                    # => The user gave us a flat param dict for all timeframes
+                    #    e.g. {'offset': (0,50)}
+                    for param_name, (low, high) in data.items():
+                        for tf in self.timeframes:
+                            parameter_indices[(indicator_name, param_name, tf)] = idx
+                            idx += 1
+            else:
+                raise ValueError(f"Indicators config for '{indicator_name}' must be a dict, got {type(data)}")
+
+        # Finally, add our model params
         for param_name in self.model_params.keys():
             parameter_indices[('model', param_name)] = idx
             idx += 1
+
         return parameter_indices
 
     def prepare_data(self):
@@ -147,15 +174,28 @@ class GeneticOptimizer:
         ind = []
         for k in keys:
             if k[0] == 'model':
+                # k = ('model', 'threshold_buy')
                 low, high = self.model_params[k[1]]
             else:
+                # k = (indicator_name, param_name, timeframe)
                 indicator_name, param_name, timeframe = k
-                low, high = self.indicators[indicator_name][param_name]
+                indicator_dict = self.indicators[indicator_name]
+
+                if set(indicator_dict.keys()).issubset(set(self.timeframes)):
+                    # => "indicator_dict" is a per-timeframe dict
+                    # e.g.  { '1min': {'width': (1000,200000)}, '5min': {...} }
+                    low, high = indicator_dict[timeframe][param_name]
+                else:
+                    # => "indicator_dict" is a single dict of param ranges
+                    # e.g.  {'offset': (0,50)}
+                    low, high = indicator_dict[param_name]
+
             if isinstance(low, int):
                 val = random.randint(low, high)
             else:
                 val = random.uniform(low, high)
             ind.append(val)
+
         return icls(ind)
 
     def evaluate_individual(self, individual):
@@ -211,10 +251,14 @@ class GeneticOptimizer:
     def load_indicators(self, config):
         indicator_params = config['indicator_params']
         indicators = {}
+
         for indicator_name, timeframes_params in indicator_params.items():
             indicators[indicator_name] = {}
+
             for timeframe, params in timeframes_params.items():
                 indicator_df = self.data_loader.calculate_indicator(indicator_name, params, timeframe)
+
+                # If not 1min, shift & resample so it lines up with base 1-minute data
                 if timeframe != '1min':
                     shift_duration = pd.to_timedelta(timeframe)
                     indicator_df_shifted = indicator_df.copy()
@@ -222,22 +266,46 @@ class GeneticOptimizer:
                     indicator_df_1min = indicator_df_shifted.resample('1min').ffill()
                     indicator_df_1min.dropna(inplace=True)
                     indicator_df = indicator_df_1min
-                indicators[indicator_name]['1min'] = indicator_df
+
+                # Store under the *actual* timeframe key (e.g. "5min", "15min", etc.)
+                indicators[indicator_name][timeframe] = indicator_df
+
         return indicators
 
     def prepare_features(self, indicators):
+        """
+        Concatenate all timeframe data into a single DataFrame at 1-minute resolution.
+        We keep the base self.base_price_data as the foundation (which is 1min bars).
+        """
         features_df = self.base_price_data.copy()
+
+        # For each indicator (e.g. 'vwap', 'vwma', 'vpvr')...
         for indicator_name, tf_dict in indicators.items():
-            if '1min' in tf_dict:
-                df = tf_dict['1min']
-                df = df.reindex(features_df.index, method='ffill').add_suffix(f'_{indicator_name}')
+            # And for each timeframe (e.g. '1min', '5min', '15min', etc.)
+            for timeframe, df in tf_dict.items():
+                # 1) Clean column names (remove any \n, trailing spaces)
+                df.columns = [col.replace('\n', '').strip() for col in df.columns]
+
+                # 2) Reindex to the base_price_data's index => ensures alignment at 1min
+                df = df.reindex(features_df.index, method='ffill')
+
+                # 3) Add a suffix that includes indicator_name + timeframe
+                #    e.g. "VWAP" => "VWAP_vwap_5min"
+                df = df.add_suffix(f'_{indicator_name}_{timeframe}')
+
+                # 4) Join them into features_df
                 features_df = features_df.join(df)
+
+        # Drop rows with NaNs from any newly joined columns
         features_df.dropna(inplace=True)
-        return self.data_loader.filter_data_by_date(
+
+        # Finally, respect the date range from the config
+        filtered = self.data_loader.filter_data_by_date(
             features_df,
             self.config.get('start_simulation'),
             self.config.get('end_simulation')
         )
+        return filtered
 
     def create_environment(self, price_data, indicators):
         from src.rl_environment import TradingEnvironment
@@ -430,10 +498,22 @@ class GeneticOptimizer:
             individual_params = []
             for k in keys:
                 if k[0] == 'model':
+                    # k = ('model', 'threshold_buy')
                     low, high = self.model_params[k[1]]
                 else:
+                    # k = (indicator_name, param_name, timeframe)
                     indicator_name, param_name, timeframe = k
-                    low, high = self.indicators[indicator_name][param_name]
+                    indicator_dict = self.indicators[indicator_name]
+
+                    if set(indicator_dict.keys()).issubset(set(self.timeframes)):
+                        # => "indicator_dict" is a per-timeframe dict
+                        # e.g.  { '1min': {'width': (1000,200000)}, '5min': {...} }
+                        low, high = indicator_dict[timeframe][param_name]
+                    else:
+                        # => "indicator_dict" is a single dict of param ranges
+                        # e.g.  {'offset': (0,50)}
+                        low, high = indicator_dict[param_name]
+
                 if isinstance(low, int):
                     val = random.randint(low, high)
                 else:

@@ -169,7 +169,6 @@ class TradingEnvironment:
 
         if portfolio_after < self.initial_capital * 0.5:
             logger.warning(f"Portfolio value below 50% initial: {portfolio_after}")
-        if portfolio_after < self.initial_capital * 0.3:
             done = True
 
         return next_state, reward, done, {}

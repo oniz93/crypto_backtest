@@ -39,7 +39,6 @@ HOSTS=(
     "rpi3nude"
     "rpi4"
     "mbp"
-    "steamdeck"
 )
 
 # Maximum number of parallel jobs
