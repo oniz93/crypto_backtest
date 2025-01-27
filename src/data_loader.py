@@ -1,5 +1,3 @@
-# src/data_loader.py
-
 import os
 from typing import Dict, Any, Union
 
@@ -8,8 +6,172 @@ import pandas as pd
 import pandas_ta as ta
 from pandas import DataFrame
 
+from numba import njit
+
 from src.config_loader import Config
 
+
+@njit
+def compute_cumulative_volume_profile_numba(close, volume, bins, width):
+    """
+    Numba-optimized function to compute cumulative volume profile.
+
+    Args:
+        close (np.ndarray): Array of close prices.
+        volume (np.ndarray): Array of volumes.
+        bins (np.ndarray): Array of bin edges.
+        width (int): Number of bins.
+
+    Returns:
+        np.ndarray: Cumulative volume per bin up to each row.
+    """
+    n = len(close)
+    cumulative_volume = np.zeros((n, width))
+
+    for i in range(n):
+        # Assign bin
+        bin_idx = np.searchsorted(bins, close[i], side='right') - 1
+        if bin_idx == width:
+            bin_idx = width - 1
+        elif bin_idx < 0:
+            bin_idx = 0
+        # Update cumulative volume
+        if i > 0:
+            cumulative_volume[i] = cumulative_volume[i - 1]
+        cumulative_volume[i, bin_idx] += volume[i]
+
+    return cumulative_volume
+
+def compute_cumulative_volume_profile_numba_wrapper(data, n_clusters=100, width=100):
+    """
+    Wrapper function to compute cumulative volume profile using Numba.
+
+    Args:
+        data (pd.DataFrame): DataFrame with 'close' and 'volume' columns.
+        width (int, optional): Number of price bins/clusters.
+
+    Returns:
+        pd.DataFrame: DataFrame with cumulative volume per cluster up to each row.
+    """
+    # Ensure the DataFrame is sorted by timestamp
+    data = data.sort_index()
+
+    # Extract 'close' and 'volume' as NumPy arrays
+    close = data['close'].values
+    volume = data['volume'].values
+
+    # Define price bins (equal-width)
+    min_price = min(close)
+    max_price = max(close)
+    bins = np.linspace(min_price, max_price, n_clusters + 1)
+
+    # Compute cumulative volume profile using Numba-optimized function
+    cumulative_volume = compute_cumulative_volume_profile_numba(close, volume, bins, n_clusters)
+
+    # Create cluster column names
+    cluster_columns = [f'cluster_{i}' for i in range(n_clusters)]
+
+    # Create a DataFrame with cumulative_volume
+    volume_profile_df = pd.DataFrame(cumulative_volume, columns=cluster_columns, index=data.index)
+    # Round each cluster column to 2 decimals
+    volume_profile_df = volume_profile_df.round(2)
+
+    return volume_profile_df
+
+def incremental_vpvr_fixed_bins(
+        df: pd.DataFrame,
+        width: int = 100,
+        n_rows: int = None,
+        bins_array: np.ndarray = None
+) -> pd.DataFrame:
+    """
+    A single-pass O(N) approach to incremental volume-by-price, with the option
+    to process only the first `n_rows` and to specify a custom bin array.
+
+    Steps:
+      1) Optional: Limit DataFrame to the first `n_rows` rows
+      2) Determine min & max of 'close' OR use a custom bins_array if provided
+      3) Create or reuse bin edges
+      4) Walk forward row-by-row, cumulatively adding volumes
+      5) For row i, store distribution from rows [0..i]
+
+    Args:
+        df (pd.DataFrame): Must have columns 'close' and 'volume'.
+        width (int): Number of bins to create if bins_array is not provided.
+        n_rows (int, optional): If set, only process the first n_rows of df.
+        bins_array (np.ndarray, optional): If set, use this array of bin edges
+            directly (e.g. np.linspace(...)). This overrides `width`.
+
+    Returns:
+        pd.DataFrame: Each row i has the cumulative distribution across `width`
+        (or len(bins_array)-1) bins for rows [0..i], with columns [cluster_0,...].
+    """
+    df = df.sort_index()
+
+    # If user passed n_rows, slice the DataFrame
+    if n_rows is not None:
+        df = df.iloc[:n_rows]
+
+    closes = df['close'].astype(float).values
+    volumes = df['volume'].astype(float).values
+    n = len(df)
+
+    # If empty or single row, just handle trivial edge cases:
+    if n == 0:
+        return pd.DataFrame([], columns=[f"cluster_{c}" for c in range(width)])
+    if n == 1:
+        # if there's only one row, everything goes into cluster_0
+        out = np.zeros((1, width), dtype=np.float64)
+        out[0, 0] = volumes[0]
+        return pd.DataFrame(out, index=df.index[:1], columns=[f"cluster_{c}" for c in range(width)])
+
+    # If no custom bins provided, build a bin array from the min & max
+    if bins_array is None:
+        min_price = min(closes)
+        max_price = max(closes)
+
+        # Avoid zero-range:
+        if min_price == max_price:
+            # Everything goes into cluster_0
+            out = np.zeros((n, width), dtype=np.float64)
+            out[0, 0] = volumes[0]
+            for i in range(1, n):
+                out[i] = out[i - 1]
+                out[i, 0] += volumes[i]
+            cluster_cols = [f"cluster_{c}" for c in range(width)]
+            return pd.DataFrame(out, columns=cluster_cols, index=df.index)
+
+        # Build equally spaced bins based on min..max
+        bins_array = np.linspace(min_price, max_price, width + 1)
+
+    # At this point, bins_array is the “edges” for price bins
+    # e.g. shape (width+1,)
+    width = len(bins_array) - 1  # We'll treat the final # of bins as len(bins_array)-1
+
+    # Our cumulative distribution so far
+    cumulative_dist = np.zeros(width, dtype=np.float64)
+    # Output array for final results
+    out = np.zeros((n, width), dtype=np.float64)
+
+    for i in range(n):
+        c_i = closes[i]
+        v_i = volumes[i]
+        # Find which bin c_i belongs to
+        bin_idx = np.searchsorted(bins_array, c_i, side='right') - 1
+        if bin_idx < 0:
+            bin_idx = 0
+        elif bin_idx >= width:
+            bin_idx = width - 1
+        cumulative_dist[bin_idx] += v_i
+        out[i] = cumulative_dist
+
+    cluster_cols = [f"cluster_{c}" for c in range(width)]
+    result_df = pd.DataFrame(out, columns=cluster_cols, index=df.index)
+
+    # Round each cluster column to 2 decimals
+    result_df = result_df.round(2)
+
+    return result_df
 
 class DataLoader:
     def __init__(self):
@@ -95,6 +257,7 @@ class DataLoader:
         Calculates a single indicator on the provided data.
         """
         data = self.tick_data[timeframe].copy()
+
         if indicator_name == 'sma':
             length = int(params['length'])
             data[f'SMA_{length}'] = ta.sma(data['close'], length=length).astype(float)
@@ -217,18 +380,32 @@ class DataLoader:
             result = data[['VWMA']].dropna()
             result = result.sub(data['close'], axis=0)
         elif indicator_name == 'vpvr':
-            width = int(params['width'])
-            # Initialize an empty temporary DataFrame with the same columns
-            temp_df = pd.DataFrame(columns=data.columns)
-            for idx, row in data.iterrows():
-                # Append the current row to the temporary DataFrame
-                temp_df = temp_df.append(row, ignore_index=True)
-                vp_df = ta.vp(temp_df['close'], temp_df['volume'], width=width, sort_close=True).astype(float)
-                binned = self.create_weighted_volume_clusters(vp_df)
-            result = vp_df.dropna()
-            result = result.sub(data['close'], axis=0)
+            width = int(params['width'])  # Number of clusters, e.g., 100
+
+            # Set number of clusters based on width for consistency
+            n_clusters = 100
+
+            # Create cluster column names
+            cluster_columns = [f'cluster_{i}' for i in range(n_clusters)]
+
+            # Initialize all cluster columns at once to prevent fragmentation
+            data[cluster_columns] = 0.0  # Alternatively, use np.nan if preferred
+
+            # Defragment the DataFrame (optional but recommended)
+            data = data.copy()
+
+            # Compute cumulative volume profile using Numba-optimized function
+            # volume_profile_df = compute_cumulative_volume_profile_numba_wrapper(data, width=n_clusters)
+            volume_profile_df = incremental_vpvr_fixed_bins(data, width=n_clusters, n_rows=width)
+            # Assign the cumulative volume profile to the original DataFrame
+            data[cluster_columns] = volume_profile_df
+
+            # The result is the cluster columns
+            result = data[cluster_columns].dropna()
+
         else:
             raise ValueError(f"Indicator {indicator_name} is not implemented.")
+
         return result
 
     def clear_variables(self):
@@ -257,81 +434,3 @@ class DataLoader:
 
         filtered_df = df.loc[(df.index >= start_date) & (df.index <= end_date)]
         return filtered_df
-
-    def create_weighted_volume_clusters(self,
-                                        vp_df: pd.DataFrame,
-                                        n_clusters: int = 100,
-                                        weight_column: str = 'mean_close',
-                                        binning_method: str = 'equal_width') -> pd.DataFrame:
-        """
-        Creates clusters based on 'mean_close' and computes the weighted mean of 'total_volume' for each cluster.
-
-        Args:
-            vp_df (pd.DataFrame): DataFrame containing VPVR data with columns
-                                  ['low_close', 'mean_close', 'high_close', 'pos_volume', 'neg_volume', 'total_volume'].
-            n_clusters (int, optional): Number of clusters to create. Default is 100.
-            weight_column (str, optional): Column to use as weights for the weighted mean. Default is 'mean_close'.
-            binning_method (str, optional): Method to bin 'mean_close'.
-                                            'equal_width' for equal-width bins,
-                                            'quantile' for quantile-based bins. Default is 'equal_width'.
-
-        Returns:
-            pd.DataFrame: DataFrame with cluster information and weighted mean of 'total_volume'.
-        """
-        # Validate input DataFrame
-        required_columns = {'low_close', 'mean_close', 'high_close', 'pos_volume', 'neg_volume', 'total_volume'}
-        if not required_columns.issubset(vp_df.columns):
-            missing = required_columns - set(vp_df.columns)
-            raise ValueError(f"Input DataFrame is missing columns: {missing}")
-
-        # Validate weight_column
-        if weight_column not in vp_df.columns:
-            raise ValueError(f"Weight column '{weight_column}' not found in DataFrame.")
-
-        # Choose binning method
-        if binning_method == 'equal_width':
-            # Create equal-width bins
-            vp_df['cluster'] = pd.cut(vp_df['mean_close'], bins=n_clusters, labels=False, include_lowest=True)
-        elif binning_method == 'quantile':
-            # Create quantile-based bins
-            vp_df['cluster'] = pd.qcut(vp_df['mean_close'], q=n_clusters, labels=False, duplicates='drop')
-            # Note: 'duplicates=drop' handles cases where there are not enough unique values to form all bins
-        else:
-            raise ValueError("Invalid binning_method. Choose 'equal_width' or 'quantile'.")
-
-        # Handle possible NaN values after binning
-        if vp_df['cluster'].isnull().any():
-            print("Warning: Some rows could not be assigned to a cluster and will be excluded from aggregation.")
-
-        # Drop rows with NaN in 'cluster'
-        clustered_df = vp_df.dropna(subset=['cluster']).copy()
-
-        # Convert 'cluster' to integer type
-        clustered_df['cluster'] = clustered_df['cluster'].astype(int)
-
-        # Group by 'cluster' and calculate weighted mean of 'total_volume'
-        aggregated = clustered_df.groupby('cluster').apply(
-            lambda x: pd.Series({
-                'price_range_low': x['low_close'].min(),
-                'price_range_high': x['high_close'].max(),
-                'mean_close': (x['mean_close'] * x[weight_column]).sum() / x[weight_column].sum(),
-                'weighted_total_volume': (x['total_volume'] * x[weight_column]).sum() / x[weight_column].sum(),
-                'sum_total_volume': x['total_volume'].sum(),
-                'count': x['total_volume'].count()
-            })
-        ).reset_index()
-
-        # Optional: Sort by 'mean_close'
-        aggregated.sort_values('mean_close', inplace=True)
-
-        cluster_dict = {f'cluster_{i}': 0 for i in range(n_clusters)}
-
-        # Populate the dictionary with actual weighted_total_volume values
-        for _, row in aggregated.iterrows():
-            cluster_name = f'cluster_{int(row["cluster"])}'
-            cluster_dict[cluster_name] = row['weighted_total_volume']
-
-        # Create a single-row DataFrame
-        single_row_df = pd.DataFrame([cluster_dict])
-
-        return single_row_df
