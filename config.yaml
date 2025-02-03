@@ -6,3 +6,4 @@ training_mode: "long"
 PCT_QTY_ORDER: 0.1
 initial_balance: 100000
 treshold_price: 0.00001
+processing: local

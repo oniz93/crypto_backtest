@@ -38,7 +38,8 @@ HOSTS=(
     "rpi3red"
     "rpi3nude"
     "rpi4"
-    "mbp"
+    "mbpw"
+    "mbpm3"
 )
 
 # Maximum number of parallel jobs

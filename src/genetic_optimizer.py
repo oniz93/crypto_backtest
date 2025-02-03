@@ -13,6 +13,8 @@ import pandas as pd
 from deap import base, creator, tools
 
 import ray
+from multiprocessing import Pool
+
 from src.config_loader import Config
 from src.data_loader import DataLoader
 
@@ -48,6 +50,11 @@ def ray_evaluate_individual(pickled_class, individual):
     We call pickled_class.evaluate_individual(individual).
     """
     return pickled_class.evaluate_individual(individual)
+
+
+def local_evaluate_individual(args):
+    optimizer, individual = args
+    return optimizer.evaluate_individual(individual)
 
 
 class GeneticOptimizer:
@@ -342,17 +349,29 @@ class GeneticOptimizer:
         avg_reward = np.mean(total_rewards)
         return agent, avg_reward
 
+    def evaluate_individuals(self, individuals):
+        """
+        Evaluate a list of individuals using the processing method specified in the config.
+        """
+        processing = self.config.get("processing", "ray").lower()
+        if processing == "ray":
+            if not ray.is_initialized():
+                ray.init(ignore_reinit_error=True)
+            tasks = [ray_evaluate_individual.remote(self, ind) for ind in individuals]
+            results = ray.get(tasks)
+        elif processing == "local":
+            with Pool() as pool:
+                results = pool.map(local_evaluate_individual, [(self, ind) for ind in individuals])
+        else:
+            results = [self.evaluate_individual(ind) for ind in individuals]
+        return results
+
     def run(self):
-        """
-        If self.gen is not None, we load that population from file.
-        Otherwise, we create one from scratch.
-        Then we run NGEN steps.
-        """
         NGEN = 100
         CXPB = 0.5
         MUTPB = 0.1
 
-        INITIAL_POPULATION = 10000
+        INITIAL_POPULATION = 100
 
         os.makedirs(f"population/{self.session_id}", exist_ok=True)
         os.makedirs(f"weights/{self.session_id}", exist_ok=True)
@@ -368,10 +387,7 @@ class GeneticOptimizer:
             pop = self.toolbox.population(n=INITIAL_POPULATION)
 
         logger.info("Evaluating initial population...")
-
-        tasks = [ray_evaluate_individual.remote(self, ind) for ind in pop]
-        results = ray.get(tasks)
-
+        results = self.evaluate_individuals(pop)
         for ind, (fit, avg_profit, agent) in zip(pop, results):
             ind.fitness.values = fit
             ind.avg_profit = avg_profit
@@ -397,10 +413,8 @@ class GeneticOptimizer:
                     del mutant.fitness.values
 
             invalid_inds = [ind for ind in offspring if not ind.fitness.valid]
-            logger.info(f"Evaluating {len(invalid_inds)} individuals with Ray...")
-            tasks = [ray_evaluate_individual.remote(self, ind) for ind in invalid_inds]
-            results = ray.get(tasks)
-
+            logger.info(f"Evaluating {len(invalid_inds)} individuals with {self.config.get('processing', 'ray')} processing...")
+            results = self.evaluate_individuals(invalid_inds)
             for ind, (fit, avg_profit, agent) in zip(invalid_inds, results):
                 ind.fitness.values = fit
                 ind.avg_profit = avg_profit
