@@ -228,7 +228,7 @@ class GeneticOptimizer:
         indicators_only = features_df.drop(columns=['close'], errors='ignore')
 
         env = self.create_environment(price_data, indicators_only)
-        agent, avg_profit = self.run_rl_training(env, episodes=50)
+        agent, avg_profit = self.run_rl_training(env, episodes=200)
 
         # If we are maximizing profit, but GA is a minimizer => return negative
         return (-avg_profit,), avg_profit, agent
@@ -503,6 +503,10 @@ class GeneticOptimizer:
 
         :param individual_params: list of parameter values, same length as self.parameter_indices
                                  or None => create random
+        """
+
+        """
+        TODO: Genera e esporta individui di esempio e focalizzati su rl_environment per otimmizzare il più possibile il training
         """
         from deap import creator
 

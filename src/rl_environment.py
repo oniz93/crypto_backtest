@@ -19,12 +19,20 @@ class TradingEnvironment:
         # Merge price_data and indicators
         self.data = price_data.join(indicators, how='inner').dropna()
         self.data = self.data.sort_index()
-        self.timestamps = self.data.index
-        self.n_steps = len(self.data)
 
-        # We want to maximize total reward from the RL perspective.
-        # The GA might invert sign if it wants to minimize.
-        self.state_dim = self.data.shape[1] + 5  # indicators + adjusted_buy_price + adjusted_sell_price + inventory + cash_ratio + entry_price
+        # Pre-convert the DataFrame for fast indexing:
+        #  - self.data_values: a NumPy array of all row values
+        #  - self.close_index: the index of the 'close' column in self.data
+        #  - self.timestamps_list: a list of timestamps for fast lookup
+        self.data_values = self.data.values
+        self.columns = self.data.columns
+        self.close_index = self.data.columns.get_loc('close')
+        self.n_steps = len(self.data_values)
+        self.timestamps_list = self.data.index.tolist()
+
+        # Calculate state dimension: original features + 5 extra fields
+        # (adjusted_buy_price, adjusted_sell_price, inventory, cash_ratio, entry_price)
+        self.state_dim = self.data.shape[1] + 5
         self.action_dim = 3  # 0=hold, 1=buy, 2=sell
 
         self.entry_price = 0.0
@@ -35,7 +43,8 @@ class TradingEnvironment:
         self.current_step = 0
         self.cash = self.initial_capital
         self.inventory = 0
-        self.last_price = self.data['close'].iloc[self.current_step]
+        # Retrieve current close price directly from the NumPy array
+        self.last_price = self.data_values[self.current_step][self.close_index]
         return self._get_state()
 
     def _get_state(self, step=None):
@@ -45,10 +54,11 @@ class TradingEnvironment:
             logger.error(f"Attempted to access step {step}, which is out of bounds.")
             raise IndexError("Step is out of bounds in _get_state.")
 
-        row = self.data.iloc[step].values
-        close_price = self.data['close'].iloc[step]
+        # Retrieve the row quickly from the NumPy array
+        row = self.data_values[step]
+        close_price = row[self.close_index]
 
-        # Adjusted prices if we decide to buy or sell
+        # Compute adjusted prices using the transaction cost
         adjusted_buy_price = close_price * (1 + self.transaction_cost)
         adjusted_sell_price = close_price / (1 + self.transaction_cost)
 
@@ -58,15 +68,11 @@ class TradingEnvironment:
         ])
 
     def step(self, action):
-        """
-        We'll keep the logic for multi-buys. The environment yields a reward
-        equal to portfolio_after - portfolio_before, which an RL agent tries
-        to maximize. The GA will handle sign if needed.
-        """
-        current_price = self.data['close'].iloc[self.current_step]
+        # Retrieve current price quickly from the NumPy array
+        current_price = self.data_values[self.current_step][self.close_index]
         portfolio_before = self.cash + self.inventory * current_price
 
-        current_timestamp = self.timestamps[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
+        current_timestamp = self.timestamps_list[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
 
         reward = 0.0
 
@@ -140,14 +146,13 @@ class TradingEnvironment:
         next_step = self.current_step + 1
         done = next_step >= self.n_steps or next_step >= self.max_steps
 
-        # portfolio delta
         if not done:
             try:
-                new_price = self.data['close'].iloc[next_step]
+                new_price = self.data_values[next_step][self.close_index]
             except IndexError:
                 logger.error(f"Attempted to access step {next_step}, which is out of bounds.")
                 done = True
-                new_price = self.data['close'].iloc[self.current_step]
+                new_price = self.data_values[self.current_step][self.close_index]
         else:
             new_price = current_price
 
@@ -170,5 +175,8 @@ class TradingEnvironment:
         if portfolio_after < self.initial_capital * 0.5:
             logger.warning(f"Portfolio value below 50% initial: {portfolio_after}")
             done = True
+            if reward > 0:
+                reward = -reward
+            reward *= 4
 
         return next_state, reward, done, {}

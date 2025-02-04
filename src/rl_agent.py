@@ -26,7 +26,9 @@ class DQNAgent:
     def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99,
                  epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01):
         # Set device to cuda if available, else cpu
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+        device = "cpu"
+        self.device = torch.device(device)
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.gamma = gamma  # the agent tries to maximize discounted reward
