@@ -120,6 +120,8 @@ class GeneticOptimizer:
                 '4h':{'width': (10, 250)},
                 '1d':{'width': (10, 60)},
             },
+            'rsi': {'length': (5, 30)},
+            'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
         }
 
     def create_parameter_indices(self):
@@ -228,7 +230,7 @@ class GeneticOptimizer:
         indicators_only = features_df.drop(columns=['close'], errors='ignore')
 
         env = self.create_environment(price_data, indicators_only)
-        agent, avg_profit = self.run_rl_training(env, episodes=200)
+        agent, avg_profit = self.run_rl_training(env, episodes=1000)
 
         # If we are maximizing profit, but GA is a minimizer => return negative
         return (-avg_profit,), avg_profit, agent
