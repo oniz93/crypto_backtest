@@ -48,24 +48,57 @@ class TradingEnvironment:
         return self._get_state()
 
     def _get_state(self, step=None):
+        # Import the normalization functions from utils
+        from src.utils import normalize_price, normalize_volume, normalize_diff
+
         if step is None:
             step = self.current_step
         if step < 0 or step >= self.n_steps:
             logger.error(f"Attempted to access step {step}, which is out of bounds.")
             raise IndexError("Step is out of bounds in _get_state.")
 
-        # Retrieve the row quickly from the NumPy array
+        # Retrieve the row from the combined data (price + indicators)
         row = self.data_values[step]
-        close_price = row[self.close_index]
+        norm_features = []
+        # Loop through each feature using the column names from self.data
+        for col, val in zip(self.data.columns, row):
+            if col in ['open', 'high', 'low', 'close']:
+                norm_features.append(normalize_price(val))
+            elif col == 'volume':
+                norm_features.append(normalize_volume(val))
+            # If your indicator names indicate a price difference, normalize as a diff
+            elif col.startswith('VWAP') or col.startswith('VWMA'):
+                norm_features.append(normalize_diff(val))
+            # For VPVR volume clusters, use volume normalization
+            elif col.startswith('cluster_'):
+                norm_features.append(normalize_volume(val))
+            else:
+                # For any other columns, leave as is (or add additional normalization if desired)
+                norm_features.append(val)
 
-        # Compute adjusted prices using the transaction cost
+        # Get the current close price (in raw scale) for further calculations
+        close_price = row[self.close_index]
         adjusted_buy_price = close_price * (1 + self.transaction_cost)
         adjusted_sell_price = close_price / (1 + self.transaction_cost)
+        norm_adjusted_buy = normalize_price(adjusted_buy_price)
+        norm_adjusted_sell = normalize_price(adjusted_sell_price)
 
-        return np.concatenate([
-            row,
-            [adjusted_buy_price, adjusted_sell_price, self.inventory, self.cash / self.initial_capital, self.entry_price]
-        ])
+        # Create a new feature: normalized difference between current price and entry price.
+        # (This will be negative if the current price is below the entry price.)
+        entry_diff = close_price - self.entry_price
+        norm_entry_diff = normalize_diff(entry_diff)
+
+        # You may choose to normalize inventory as well (here we leave it raw)
+        extra_features = [
+            norm_adjusted_buy,   # normalized adjusted buy price
+            norm_adjusted_sell,  # normalized adjusted sell price
+            self.inventory,      # inventory (you might later choose to normalize this)
+            self.cash / self.initial_capital,  # cash ratio (already between 0 and 1)
+            norm_entry_diff      # normalized price difference (current - entry)
+        ]
+
+        # Return the state vector as the concatenation of normalized features and extra features
+        return np.concatenate([np.array(norm_features), np.array(extra_features)])
 
     def step(self, action):
         # Get the current price and portfolio value before any action.
@@ -170,8 +203,6 @@ class TradingEnvironment:
         portfolio_after = self.cash + self.inventory * new_price
         # The reward is the net change in portfolio value minus any penalties.
         reward = (portfolio_after - portfolio_before) - penalty
-        if reward > 0:
-            reward *= 3
 
         # Build the next state.
         if not done:

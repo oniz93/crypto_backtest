@@ -9,6 +9,8 @@ from pandas import DataFrame
 from numba import njit
 
 from src.config_loader import Config
+from src.utils import normalize_price, normalize_volume, normalize_diff, normalize_rsi
+
 
 
 @njit
@@ -261,20 +263,25 @@ class DataLoader:
         if indicator_name == 'sma':
             length = int(params['length'])
             data[f'SMA_{length}'] = ta.sma(data['close'], length=length).astype(float)
+            data[f'SMA_{length}'] = data[f'SMA_{length}'].apply(lambda x: normalize_price(x))
             result = data[[f'SMA_{length}']].dropna()
         elif indicator_name == 'ema':
             length = int(params['length'])
             data[f'EMA_{length}'] = ta.ema(data['close'], length=length).astype(float)
+            data[f'EMA_{length}'] = data[f'EMA_{length}'].apply(lambda x: normalize_price(x))
             result = data[[f'EMA_{length}']].dropna()
         elif indicator_name == 'rsi':
             length = int(params['length'])
             data[f'RSI_{length}'] = ta.rsi(data['close'], length=length).astype(float)
+            data[f'RSI_{length}'] = data[f'RSI_{length}'].apply(lambda x: normalize_rsi(x))
             result = data[[f'RSI_{length}']].dropna()
         elif indicator_name == 'macd':
             fast = int(params['fast'])
             slow = int(params['slow'])
             signal = int(params['signal'])
             macd_df = ta.macd(data['close'], fast=fast, slow=slow, signal=signal).astype(float)
+            for col in macd_df.columns:
+                macd_df[col] = macd_df[col].apply(lambda x: normalize_diff(x))
             result = macd_df.dropna()
         elif indicator_name == 'bbands':
             length = int(params['length'])
@@ -284,6 +291,7 @@ class DataLoader:
         elif indicator_name == 'atr':
             length = int(params['length'])
             data[f'ATR_{length}'] = ta.atr(data['high'], data['low'], data['close'], length=length).astype(float)
+            data[f'ATR_{length}'] = data[f'ATR_{length}'].apply(lambda x: normalize_diff(x))
             result = data[[f'ATR_{length}']].dropna()
         elif indicator_name == 'stoch':
             k = int(params['k'])
@@ -372,11 +380,13 @@ class DataLoader:
         elif indicator_name == 'vwap':
             offset = int(params['offset'])
             data['VWAP'] = ta.vwap(data['high'], data['low'], data['close'], data['volume'], offset=offset).astype(float)
+            data['VWAP'] = data['VWAP'].apply(lambda x: normalize_diff(x))
             result = data[['VWAP']].dropna()
             result = result.sub(data['close'], axis=0)
         elif indicator_name == 'vwma':
             length = int(params['length'])
             data['VWMA'] = ta.vwma(data['close'], data['volume'], length=length).astype(float)
+            data['VWMA'] = data['VWMA'].apply(lambda x: normalize_diff(x))
             result = data[['VWMA']].dropna()
             result = result.sub(data['close'], axis=0)
         elif indicator_name == 'vpvr':
@@ -399,6 +409,9 @@ class DataLoader:
             volume_profile_df = incremental_vpvr_fixed_bins(data, width=n_clusters, n_rows=width)
             # Assign the cumulative volume profile to the original DataFrame
             data[cluster_columns] = volume_profile_df
+
+            for col in cluster_columns:
+                data[col] = data[col].apply(lambda x: normalize_volume(x))
 
             # The result is the cluster columns
             result = data[cluster_columns].dropna()

@@ -45,7 +45,35 @@ def protected_div(left, right):
     except ZeroDivisionError:
         return 1
 
-
 def timestamp_to_datetime(timestamp_ms):
     """Converts a timestamp in milliseconds to a datetime object in UTC."""
     return datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc)
+
+def normalize_price(price, max_price=150000):
+    """
+    Normalize a price value to the range [-1, 1] given a maximum price.
+    0 -> -1, max_price -> 1.
+    """
+    norm = 2 * (price / max_price) - 1
+    return max(min(norm, 1), -1)
+
+def normalize_volume(volume, max_volume=1000000):
+    """
+    Normalize a volume value to the range [-1, 1] given a chosen maximum volume.
+    """
+    norm = 2 * (volume / max_volume) - 1
+    return max(min(norm, 1), -1)
+
+def normalize_diff(diff, max_diff=150000):
+    """
+    Normalize a difference (which may be negative) to the range [-1, 1]
+    assuming the expected maximum absolute difference is max_diff.
+    """
+    norm = diff / max_diff
+    return max(min(norm, 1), -1)
+
+def normalize_rsi(rsi):
+    """
+    Normalize RSI (normally in 0-100) so that 50 -> 0, 0 -> -1 and 100 -> 1.
+    """
+    return (rsi / 50) - 1
