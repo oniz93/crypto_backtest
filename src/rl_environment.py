@@ -68,97 +68,112 @@ class TradingEnvironment:
         ])
 
     def step(self, action):
-        # Retrieve current price quickly from the NumPy array
+        # Get the current price and portfolio value before any action.
         current_price = self.data_values[self.current_step][self.close_index]
         portfolio_before = self.cash + self.inventory * current_price
 
+        # For logging purposes.
         current_timestamp = self.timestamps_list[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
 
-        reward = 0.0
+        # Initialize a penalty variable.
+        penalty = 0.0
+        # Define a fraction of cash to use in each trade.
+        trade_fraction = 0.1
 
+        # --- Process Actions Based on Mode ---
         if self.mode == "long":
-            if action == 1:  # buy
+            if action == 1:  # BUY
+                # If already short, buying is an invalid move.
                 if self.inventory < 0:
-                    reward -= 1000.0
+                    penalty = 0.02 * portfolio_before  # 2% penalty of current portfolio.
                 else:
-                    buy_usd = 0.1 * self.cash
+                    buy_usd = trade_fraction * self.cash
+                    # If the available cash is too little to trade, assign a small penalty.
                     if buy_usd < 100:
-                        reward -= 500.0
+                        penalty = 0.01 * portfolio_before
                     else:
                         qty = (buy_usd / current_price) * (1 - self.transaction_cost)
+                        # If already holding a long position, update the weighted average entry price.
                         if self.inventory > 0:
                             old_value = self.inventory * self.entry_price
                             new_value = qty * current_price
                             total_qty = self.inventory + qty
-                            new_entry_price = (old_value + new_value) / total_qty
-                            self.entry_price = new_entry_price
+                            self.entry_price = (old_value + new_value) / total_qty
                             self.inventory = total_qty
                         else:
                             self.entry_price = current_price
                             self.inventory += qty
                         self.cash -= buy_usd
 
-            elif action == 2:  # sell (close all)
+            elif action == 2:  # SELL (Close Long Position)
                 if self.inventory <= 0:
-                    reward -= 500.0
+                    penalty = 0.02 * portfolio_before
                 else:
                     proceeds = self.inventory * current_price
                     proceeds_after_cost = proceeds * (1 - self.transaction_cost)
                     self.cash += proceeds_after_cost
                     self.inventory = 0.0
                     self.entry_price = 0.0
+            # Action 0 (hold) does nothing.
 
         elif self.mode == "short":
-            if action == 1:  # open or add short
+            if action == 1:  # Open/Add Short Position
                 if self.inventory > 0:
-                    reward -= 1000.0
+                    penalty = 0.02 * portfolio_before
                 else:
-                    sell_usd = 0.1 * self.cash
+                    sell_usd = trade_fraction * self.cash
                     if sell_usd < 100:
-                        reward -= 500.0
+                        penalty = 0.01 * portfolio_before
                     else:
                         qty = (sell_usd / current_price) * (1 - self.transaction_cost)
                         if self.inventory < 0:
                             old_value = abs(self.inventory) * self.entry_price
                             new_value = qty * current_price
                             total_qty = abs(self.inventory) + qty
-                            new_entry_price = (old_value + new_value) / total_qty
-                            self.entry_price = new_entry_price
+                            self.entry_price = (old_value + new_value) / total_qty
                             self.inventory -= qty
                         else:
                             self.entry_price = current_price
                             self.inventory -= qty
                         self.cash -= sell_usd
 
-            elif action == 2:  # buy to cover short fully
+            elif action == 2:  # Buy to Cover Short Position
                 if self.inventory >= 0:
-                    reward -= 500.0
+                    penalty = 0.02 * portfolio_before
                 else:
                     cost_to_cover = abs(self.inventory) * current_price
                     cost_after_cost = cost_to_cover * (1 + self.transaction_cost)
                     if cost_after_cost > self.cash:
-                        reward -= 1000.0
+                        penalty = 0.02 * portfolio_before
                     else:
                         self.cash -= cost_after_cost
                         self.inventory = 0.0
                         self.entry_price = 0.0
+            # Hold does nothing.
 
+        # --- Step to the Next Time Period ---
         next_step = self.current_step + 1
         done = next_step >= self.n_steps or next_step >= self.max_steps
 
+        # Try to obtain the new price (if we're not at the end).
         if not done:
             try:
                 new_price = self.data_values[next_step][self.close_index]
             except IndexError:
                 logger.error(f"Attempted to access step {next_step}, which is out of bounds.")
+                new_price = current_price
                 done = True
-                new_price = self.data_values[self.current_step][self.close_index]
         else:
             new_price = current_price
 
+        # Compute the portfolio value after the action.
         portfolio_after = self.cash + self.inventory * new_price
-        reward += (portfolio_after - portfolio_before)
+        # The reward is the net change in portfolio value minus any penalties.
+        reward = (portfolio_after - portfolio_before) - penalty
+        if reward > 0:
+            reward *= 3
 
+        # Build the next state.
         if not done:
             try:
                 next_state = self._get_state(next_step)
@@ -168,15 +183,16 @@ class TradingEnvironment:
         else:
             next_state = np.zeros(self.state_dim)
 
+        # Update the current step.
         self.current_step = next_step
         if self.current_step % 1000 == 0:
             logger.debug(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after} - Done: {done}")
 
-        if portfolio_after < self.initial_capital * 0.5:
+        # Terminal condition: if the portfolio falls below 50% of the initial capital.
+        if portfolio_after < 0.5 * self.initial_capital:
             logger.warning(f"Portfolio value below 50% initial: {portfolio_after}")
             done = True
-            if reward > 0:
-                reward = -reward
-            reward *= 4
+            reward -= 0.05 * portfolio_before  # additional terminal penalty
 
         return next_state, reward, done, {}
+
