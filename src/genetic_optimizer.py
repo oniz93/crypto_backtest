@@ -345,8 +345,10 @@ class GeneticOptimizer:
                 agent.update_policy()
                 state = next_state
                 ep_reward += reward
+                last_step = info.get('n_step', 0)
+            ep_reward += last_step
             total_rewards.append(ep_reward)
-            logger.info(f"One training done. Reward: {ep_reward}")
+            logger.info(f"One training done. Reward: {ep_reward} - Last step: {last_step}")
 
         avg_reward = np.mean(total_rewards)
         return agent, avg_reward

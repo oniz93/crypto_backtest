@@ -220,10 +220,10 @@ class TradingEnvironment:
             logger.debug(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after} - Done: {done}")
 
         # Terminal condition: if the portfolio falls below 50% of the initial capital.
-        if portfolio_after < 0.5 * self.initial_capital:
-            logger.warning(f"Portfolio value below 50% initial: {portfolio_after}")
+        if portfolio_after < 0.75 * self.initial_capital:
+            logger.warning(f"Portfolio value below 75% initial: {portfolio_after}")
             done = True
             reward -= 0.05 * portfolio_before  # additional terminal penalty
 
-        return next_state, reward, done, {}
+        return next_state, reward, done, {"n_step": next_step}
 
