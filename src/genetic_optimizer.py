@@ -332,7 +332,8 @@ class GeneticOptimizer:
 
     def run_rl_training(self, env, episodes=10):
         from src.rl_agent import DQNAgent
-        agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3)
+        seq_length = self.config.get('seq_length', 1440)
+        agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-2, seq_length=seq_length)
         total_rewards = []
         for ep in range(episodes):
             state = env.reset()
