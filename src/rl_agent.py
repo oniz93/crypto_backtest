@@ -245,7 +245,7 @@ class DQNAgent:
         # Add a learning rate scheduler.
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, factor=0.9, patience=10)
         # Use torch.amp for mixed precision training (if using CUDA).
-        self.scaler = torch.amp.GradScaler(device_type="cuda") if self.device.type == "cuda" else None
+        self.scaler = torch.amp.GradScaler("cuda") if self.device.type == "cuda" else None
 
         # Initialize the prioritized replay buffer.
         self.buffer = PrioritizedReplayBuffer(buffer_capacity, alpha=per_alpha)
@@ -343,7 +343,7 @@ class DQNAgent:
 
         # Use mixed precision if available.
         if self.scaler is not None:
-            with torch.amp.autocast(device_type="cuda"):
+            with torch.amp.autocast("cuda"):
                 q_values, _ = self.q_net(states)
                 q_values = q_values.gather(1, actions)
                 with torch.no_grad():
