@@ -117,7 +117,11 @@ class PrioritizedReplayBuffer:
 
         # To normalize IS weights, get the minimum probability
         p_min = np.min(self.tree.tree[-self.tree.capacity:]) / self.tree.total_priority
-        max_weight = (p_min * n) ** (-beta)
+        # Fix: Avoid division by zero
+        if p_min == 0:
+            max_weight = 1.0
+        else:
+            max_weight = (p_min * n) ** (-beta)
 
         for i in range(n):
             a = segment * i
@@ -240,8 +244,8 @@ class DQNAgent:
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         # Add a learning rate scheduler.
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, factor=0.9, patience=10)
-        # Optionally, initialize a GradScaler for mixed precision (if using CUDA).
-        self.scaler = torch.cuda.amp.GradScaler() if self.device.type == "cuda" else None
+        # Use torch.amp for mixed precision training (if using CUDA).
+        self.scaler = torch.amp.GradScaler(device_type="cuda") if self.device.type == "cuda" else None
 
         # Initialize the prioritized replay buffer.
         self.buffer = PrioritizedReplayBuffer(buffer_capacity, alpha=per_alpha)
@@ -339,7 +343,7 @@ class DQNAgent:
 
         # Use mixed precision if available.
         if self.scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type="cuda"):
                 q_values, _ = self.q_net(states)
                 q_values = q_values.gather(1, actions)
                 with torch.no_grad():
