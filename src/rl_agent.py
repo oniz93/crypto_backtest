@@ -2,8 +2,7 @@
 rl_agent.py
 -----------
 This module defines the reinforcement learning (RL) agent.
-It implements a combined recurrent neural network that first uses LSTM layers
-to capture long-term dependencies and then GRU layers to refine the output.
+It implements a recurrent neural network using GRU layers to capture dependencies in the data.
 This agent is used within the genetic algorithm to evaluate individuals.
 """
 
@@ -12,29 +11,21 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-class CombinedQNetwork(nn.Module):
+class GRUQNetwork(nn.Module):
     def __init__(self, state_dim, action_dim,
-                 hidden_size_lstm=256, hidden_size_gru=256,
-                 lstm_layers=1, gru_layers=1):
+                 hidden_size_gru=512, gru_layers=2):
         """
-        Combined Q-Network with LSTM followed by GRU.
+        Q-Network with GRU layers.
 
         Parameters:
             state_dim (int): Number of features per timestep (e.g. ~1000).
             action_dim (int): Number of possible actions.
-            hidden_size_lstm (int): Hidden size for the LSTM layer.
             hidden_size_gru (int): Hidden size for the GRU layer.
-            lstm_layers (int): Number of stacked LSTM layers.
             gru_layers (int): Number of stacked GRU layers.
         """
-        super(CombinedQNetwork, self).__init__()
-        # LSTM to process the input sequence and capture long-term dependencies.
-        self.lstm = nn.LSTM(input_size=state_dim,
-                            hidden_size=hidden_size_lstm,
-                            num_layers=lstm_layers,
-                            batch_first=True)
-        # GRU to refine the representation from the LSTM.
-        self.gru = nn.GRU(input_size=hidden_size_lstm,
+        super(GRUQNetwork, self).__init__()
+        # GRU to process the input sequence.
+        self.gru = nn.GRU(input_size=state_dim,
                           hidden_size=hidden_size_gru,
                           num_layers=gru_layers,
                           batch_first=True)
@@ -52,17 +43,10 @@ class CombinedQNetwork(nn.Module):
         Returns:
             tuple: (q_values, hidden_state) where q_values is of shape (batch, action_dim).
         """
-        # Pass the input through the LSTM layers.
-        lstm_out, _ = self.lstm(x)  # Shape: (batch, seq_len, hidden_size_lstm)
-        # Feed the LSTM output to the GRU layers.
-        gru_out, _ = self.gru(lstm_out)  # Shape: (batch, seq_len, hidden_size_gru)
-        # Check the dimensions of the GRU output.
-        if gru_out.dim() == 2:
-            # If the GRU output is already 2D, use it directly.
-            last_out = gru_out
-        else:
-            # Otherwise, select the output of the last timestep.
-            last_out = gru_out[:, -1, :]  # Shape: (batch, hidden_size_gru)
+        # Pass the input through the GRU layers.
+        gru_out, _ = self.gru(x)  # Shape: (batch, seq_len, hidden_size_gru)
+        # Select the output of the last timestep.
+        last_out = gru_out[:, -1, :]  # Shape: (batch, hidden_size_gru)
         # Apply ReLU activation and map to Q-values.
         q_values = self.fc(torch.relu(last_out))
         return q_values, None
@@ -71,7 +55,7 @@ class DQNAgent:
     def __init__(self, state_dim, action_dim, lr=1e-2, gamma=0.90,
                  epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01, seq_length=1440):
         """
-        DQN Agent using the combined LSTM+GRU Q-Network.
+        DQN Agent using the GRU Q-Network.
 
         Parameters:
             state_dim (int): Number of features per timestep.
@@ -84,7 +68,7 @@ class DQNAgent:
             seq_length (int): History length (number of timesteps).
         """
         # Choose the appropriate device (CUDA if available, else CPU).
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         self.device = torch.device(device)
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -95,8 +79,8 @@ class DQNAgent:
         self.seq_length = seq_length
 
         # Initialize the Q-network and target network.
-        self.q_net = CombinedQNetwork(state_dim, action_dim).to(self.device)
-        self.target_net = CombinedQNetwork(state_dim, action_dim).to(self.device)
+        self.q_net = GRUQNetwork(state_dim, action_dim).to(self.device)
+        self.target_net = GRUQNetwork(state_dim, action_dim).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())
         # Set up the optimizer.
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)

@@ -13,6 +13,7 @@ import logging
 import os
 import random
 import sys
+import hashlib
 
 import numpy as np
 import pandas as pd
@@ -230,7 +231,7 @@ class GeneticOptimizer:
             ind.append(val)
         return icls(ind)
 
-    def evaluate_individual(self, individual):
+    def evaluate_individual(self, individual, useLocal=False):
         """
         Evaluate an individual by:
           1. Converting the individual's parameter list into a configuration.
@@ -245,11 +246,25 @@ class GeneticOptimizer:
         """
         # Convert the list of values into a configuration dictionary.
         config = self.extract_config_from_individual(individual)
-        logger.info("Start creating features for individual...")
-        # Calculate technical indicators based on the configuration.
-        indicators = self.load_indicators(config)
-        # Prepare the features DataFrame by joining base price data with the indicator data.
-        features_df = self.prepare_features(indicators)
+        if(useLocal):
+            hash = hashlib.md5(str(individual).encode()).hexdigest()
+            features_file = f"features/{hash}.parquet"
+            if os.path.exists(features_file):
+                logger.info("Loading indicator features from file...")
+                features_df = pd.read_parquet(features_file)
+            else:
+                logger.info("Start creating features for individual...")
+                # Calculate technical indicators based on the configuration.
+                indicators = self.load_indicators(config)
+                # Prepare the features DataFrame by joining base price data with the indicator data.
+                features_df = self.prepare_features(indicators)
+                features_df.to_parquet(features_file)
+        else:
+            logger.info("Start creating features for individual...")
+            # Calculate technical indicators based on the configuration.
+            indicators = self.load_indicators(config)
+            # Prepare the features DataFrame by joining base price data with the indicator data.
+            features_df = self.prepare_features(indicators)
 
         # Check if there is enough data.
         if len(features_df) < 100:
@@ -611,7 +626,7 @@ class GeneticOptimizer:
                 individual_params.append(val)
         ind = creator.Individual(individual_params)
         logger.info("=== Debugging single individual ===")
-        fit, avg_profit, agent = self.evaluate_individual(ind)
+        fit, avg_profit, agent = self.evaluate_individual(ind, useLocal=True)
         logger.info(f"Evaluation finished. Fit: {fit}, Profit: {avg_profit}")
         if agent is not None:
             logger.info("An RL agent was created; you can place breakpoints inside run_rl_training or environment.")
