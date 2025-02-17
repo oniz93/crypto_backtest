@@ -2,14 +2,16 @@ import os
 from typing import Dict, Any, Union
 
 import numpy as np
+
 import pandas as pd
+
 import pandas_ta as ta
 from pandas import DataFrame
 
 from numba import njit
 
 from src.config_loader import Config
-from src.utils import normalize_price, normalize_volume, normalize_diff, normalize_rsi
+from src.utils import normalize_price_vec, normalize_volume_vec, normalize_diff_vec, normalize_rsi_vec
 
 
 
@@ -44,7 +46,7 @@ def compute_cumulative_volume_profile_numba(close, volume, bins, width):
 
     return cumulative_volume
 
-def compute_cumulative_volume_profile_numba_wrapper(data, n_clusters=100, width=100):
+def compute_cumulative_volume_profile_numba_wrapper(data, n_clusters=100):
     """
     Wrapper function to compute cumulative volume profile using Numba.
 
@@ -54,6 +56,8 @@ def compute_cumulative_volume_profile_numba_wrapper(data, n_clusters=100, width=
 
     Returns:
         pd.DataFrame: DataFrame with cumulative volume per cluster up to each row.
+        :param data:
+        :param n_clusters:
     """
     # Ensure the DataFrame is sorted by timestamp
     data = data.sort_index()
@@ -95,7 +99,7 @@ def incremental_vpvr_fixed_bins(
       2) Determine min & max of 'close' OR use a custom bins_array if provided
       3) Create or reuse bin edges
       4) Walk forward row-by-row, cumulatively adding volumes
-      5) For row i, store distribution from rows [0..i]
+      5) For row i, store distribution from rows [0...i]
 
     Args:
         df (pd.DataFrame): Must have columns 'close' and 'volume'.
@@ -106,7 +110,7 @@ def incremental_vpvr_fixed_bins(
 
     Returns:
         pd.DataFrame: Each row i has the cumulative distribution across `width`
-        (or len(bins_array)-1) bins for rows [0..i], with columns [cluster_0,...].
+        (or len(bins_array)-1) bins for rows [0...i], with columns [cluster_0,...].
     """
     df = df.sort_index()
 
@@ -143,7 +147,7 @@ def incremental_vpvr_fixed_bins(
             cluster_cols = [f"cluster_{c}" for c in range(width)]
             return pd.DataFrame(out, columns=cluster_cols, index=df.index)
 
-        # Build equally spaced bins based on min..max
+        # Build equally spaced bins based on min...max
         bins_array = np.linspace(min_price, max_price, width + 1)
 
     # At this point, bins_array is the “edges” for price bins
@@ -175,6 +179,29 @@ def incremental_vpvr_fixed_bins(
 
     return result_df
 
+
+def filter_data_by_date(df: DataFrame, start_date: Union[str, pd.Timestamp], end_date: Union[str, pd.Timestamp]):
+    start_date = pd.to_datetime(start_date)
+    end_date = pd.to_datetime(end_date)
+
+    if start_date > end_date:
+        raise ValueError("start_date must be <= end_date")
+
+    if df.empty:
+        return df
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df.index = pd.to_datetime(df.index)
+            df.sort_index(inplace=True)
+        except Exception as e:
+            print(f"Error converting index to DatetimeIndex: {e}")
+            return df
+
+    filtered_df = df.loc[(df.index >= start_date) & (df.index <= end_date)]
+    return filtered_df
+
+
 class DataLoader:
     def __init__(self):
         self.tick_data = {}
@@ -204,7 +231,7 @@ class DataLoader:
         tick_data_1m.sort_index(inplace=True)
 
         config = Config()
-        tick_data_1m = self.filter_data_by_date(tick_data_1m, config.get('start_cutoff'), config.get('end_cutoff'))
+        tick_data_1m = filter_data_by_date(tick_data_1m, config.get('start_cutoff'), config.get('end_cutoff'))
         self.tick_data[self.base_timeframe] = tick_data_1m
 
     def resample_data(self):
@@ -263,17 +290,17 @@ class DataLoader:
         if indicator_name == 'sma':
             length = int(params['length'])
             data[f'SMA_{length}'] = ta.sma(data['close'], length=length).astype(float)
-            data[f'SMA_{length}'] = data[f'SMA_{length}'].apply(lambda x: normalize_price(x))
+            data[f'SMA_{length}'] = normalize_price_vec(data[f'SMA_{length}'])
             result = data[[f'SMA_{length}']].dropna()
         elif indicator_name == 'ema':
             length = int(params['length'])
             data[f'EMA_{length}'] = ta.ema(data['close'], length=length).astype(float)
-            data[f'EMA_{length}'] = data[f'EMA_{length}'].apply(lambda x: normalize_price(x))
+            data[f'EMA_{length}'] = normalize_price_vec(data[f'EMA_{length}'])
             result = data[[f'EMA_{length}']].dropna()
         elif indicator_name == 'rsi':
             length = int(params['length'])
             data[f'RSI_{length}'] = ta.rsi(data['close'], length=length).astype(float)
-            data[f'RSI_{length}'] = data[f'RSI_{length}'].apply(lambda x: normalize_rsi(x))
+            data[f'RSI_{length}'] = normalize_rsi_vec(data[f'RSI_{length}'])
             result = data[[f'RSI_{length}']].dropna()
         elif indicator_name == 'macd':
             fast = int(params['fast'])
@@ -281,7 +308,7 @@ class DataLoader:
             signal = int(params['signal'])
             macd_df = ta.macd(data['close'], fast=fast, slow=slow, signal=signal).astype(float)
             for col in macd_df.columns:
-                macd_df[col] = macd_df[col].apply(lambda x: normalize_diff(x))
+                macd_df[col] = normalize_diff_vec(macd_df[col])
             result = macd_df.dropna()
         elif indicator_name == 'bbands':
             length = int(params['length'])
@@ -291,7 +318,7 @@ class DataLoader:
         elif indicator_name == 'atr':
             length = int(params['length'])
             data[f'ATR_{length}'] = ta.atr(data['high'], data['low'], data['close'], length=length).astype(float)
-            data[f'ATR_{length}'] = data[f'ATR_{length}'].apply(lambda x: normalize_diff(x))
+            data[f'ATR_{length}'] = normalize_diff_vec(data[f'ATR_{length}'])
             result = data[[f'ATR_{length}']].dropna()
         elif indicator_name == 'stoch':
             k = int(params['k'])
@@ -380,13 +407,13 @@ class DataLoader:
         elif indicator_name == 'vwap':
             offset = int(params['offset'])
             data['VWAP'] = ta.vwap(data['high'], data['low'], data['close'], data['volume'], offset=offset).astype(float)
-            data['VWAP'] = data['VWAP'].apply(lambda x: normalize_diff(x))
+            data['VWAP'] = normalize_diff_vec(data['VWAP'])
             result = data[['VWAP']].dropna()
             result = result.sub(data['close'], axis=0)
         elif indicator_name == 'vwma':
             length = int(params['length'])
             data['VWMA'] = ta.vwma(data['close'], data['volume'], length=length).astype(float)
-            data['VWMA'] = data['VWMA'].apply(lambda x: normalize_diff(x))
+            data['VWMA'] = normalize_diff_vec(data['VWMA'])
             result = data[['VWMA']].dropna()
             result = result.sub(data['close'], axis=0)
         elif indicator_name == 'vpvr':
@@ -398,20 +425,24 @@ class DataLoader:
             # Create cluster column names
             cluster_columns = [f'cluster_{i}' for i in range(n_clusters)]
 
-            # Initialize all cluster columns at once to prevent fragmentation
-            data[cluster_columns] = 0.0  # Alternatively, use np.nan if preferred
+            # Create the new cluster DataFrame in one go:
+            clusters_df = pd.DataFrame(0.0, index=data.index, columns=cluster_columns)
+            # Join the new DataFrame to data in one operation:
+            data = data.join(clusters_df)
 
-            # Defragment the DataFrame (optional but recommended)
-            data = data.copy()
-
-            # Compute cumulative volume profile using Numba-optimized function
-            # volume_profile_df = compute_cumulative_volume_profile_numba_wrapper(data, width=n_clusters)
+            # Now compute the volume profile (using your Numba-accelerated function):
             volume_profile_df = incremental_vpvr_fixed_bins(data, width=n_clusters, n_rows=width)
-            # Assign the cumulative volume profile to the original DataFrame
-            data[cluster_columns] = volume_profile_df
+            # Instead of doing an in-place assignment that could re-fragment the frame,
+            # create a new DataFrame for the clusters:
+            new_clusters = volume_profile_df.copy()
+            # Optionally, apply vectorized normalization to each column:
+            for col in cluster_columns:
+                new_clusters[col] = normalize_volume_vec(new_clusters[col].values)
+            # Now, replace the old cluster columns in data by concatenating the new ones:
+            data = data.drop(columns=cluster_columns, errors='ignore').join(new_clusters)
 
             for col in cluster_columns:
-                data[col] = data[col].apply(lambda x: normalize_volume(x))
+                data[col] = normalize_volume_vec(data[col])
 
             # The result is the cluster columns
             result = data[cluster_columns].dropna()
@@ -426,24 +457,3 @@ class DataLoader:
         self.support_resistance = {}
         self.funding_rates = {}
         self.cache = {}
-
-    def filter_data_by_date(self, df: DataFrame, start_date: Union[str, pd.Timestamp], end_date: Union[str, pd.Timestamp]):
-        start_date = pd.to_datetime(start_date)
-        end_date = pd.to_datetime(end_date)
-
-        if start_date > end_date:
-            raise ValueError("start_date must be <= end_date")
-
-        if df.empty:
-            return df
-
-        if not isinstance(df.index, pd.DatetimeIndex):
-            try:
-                df.index = pd.to_datetime(df.index)
-                df.sort_index(inplace=True)
-            except Exception as e:
-                print(f"Error converting index to DatetimeIndex: {e}")
-                return df
-
-        filtered_df = df.loc[(df.index >= start_date) & (df.index <= end_date)]
-        return filtered_df

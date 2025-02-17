@@ -50,8 +50,9 @@ class DQNAgent:
           (If you plan to use a history of states, set seq_length > 1.
            For a single state, seq_length=1.)
         """
-        # Set device (change "cpu" to "cuda" if you have a GPU)
-        device = "cpu"
+        # Set device (change "cpu" to "cuda" if you have a GPU) or "mps" for apple-silicon
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # device = "mps"
         self.device = torch.device(device)
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -97,8 +98,8 @@ class DQNAgent:
         batch = [self.buffer[i] for i in indices]
         states, actions, rewards, next_states, dones = zip(*batch)
         # Convert to tensors and add sequence dimension.
-        states = torch.FloatTensor(states).to(self.device).unsqueeze(1)  # shape: (batch, 1, state_dim)
-        next_states = torch.FloatTensor(next_states).to(self.device).unsqueeze(1)
+        states = torch.from_numpy(np.stack(states)).float().to(self.device).unsqueeze(1)
+        next_states = torch.from_numpy(np.stack(next_states)).float().to(self.device).unsqueeze(1)
         actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
         dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)

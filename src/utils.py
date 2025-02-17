@@ -1,6 +1,7 @@
 # src/utils.py
 
 from datetime import datetime, timezone
+import numpy as np
 
 def convert_date_to_time(date_str):
     """Converts a date string to a datetime object."""
@@ -77,3 +78,18 @@ def normalize_rsi(rsi):
     Normalize RSI (normally in 0-100) so that 50 -> 0, 0 -> -1 and 100 -> 1.
     """
     return (rsi / 50) - 1
+
+def normalize_price_vec(prices, max_price=150000):
+    norm = 2 * (prices / max_price) - 1
+    return np.clip(norm, -1, 1)
+
+def normalize_volume_vec(volumes, max_volume=1000000):
+    norm = 2 * (volumes / max_volume) - 1
+    return np.clip(norm, -1, 1)
+
+def normalize_diff_vec(diffs, max_diff=150000):
+    norm = diffs / max_diff
+    return np.clip(norm, -1, 1)
+
+def normalize_rsi_vec(rsis):
+    return (rsis / 50) - 1
