@@ -13,7 +13,7 @@ import torch.optim as optim
 
 class GRUQNetwork(nn.Module):
     def __init__(self, state_dim, action_dim,
-                 hidden_size_gru=512, gru_layers=2):
+                 hidden_size_gru=256, gru_layers=1):
         """
         Q-Network with GRU layers.
 
