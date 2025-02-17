@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-
 class CombinedQNetwork(nn.Module):
     def __init__(self, state_dim, action_dim,
                  hidden_size_lstm=512, hidden_size_gru=512,
@@ -49,27 +48,21 @@ class CombinedQNetwork(nn.Module):
         # Pass LSTM outputs through GRU.
         gru_out, _ = self.gru(lstm_out)  # (batch, seq_len, hidden_size_gru)
         # Use the output at the final timestep.
-        last_out = gru_out[:, -1, :]  # (batch, hidden_size_gru)
-        # Apply a ReLU activation and then the final layer.
+        # If for any reason gru_out is 2D, we force a dimension:
+        if gru_out.dim() == 2:
+            last_out = gru_out
+        else:
+            last_out = gru_out[:, -1, :]  # (batch, hidden_size_gru)
         q_values = self.fc(torch.relu(last_out))
         return q_values, None
-
 
 class DQNAgent:
     def __init__(self, state_dim, action_dim, lr=1e-2, gamma=0.90,
                  epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01, seq_length=1440):
         """
         DQN Agent that uses a combined LSTM+GRU network.
-
-        Args:
-            state_dim (int): Feature dimension (e.g. ~1000).
-            action_dim (int): Number of actions.
-            lr (float): Learning rate.
-            gamma (float): Discount factor.
-            epsilon (float): Initial exploration rate.
-            epsilon_decay (float): Multiplicative decay for epsilon.
-            epsilon_min (float): Minimum epsilon.
-            seq_length (int): The length of the input history (e.g. 1440 timesteps).
+        - seq_length: the length of the state sequence input.
+          (For a single timestep, set seq_length = 1; for historical context, set > 1.)
         """
         # Use CUDA if available.
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -82,7 +75,6 @@ class DQNAgent:
         self.epsilon_min = epsilon_min
         self.seq_length = seq_length
 
-        # Create the combined recurrent network.
         self.q_net = CombinedQNetwork(state_dim, action_dim).to(self.device)
         self.target_net = CombinedQNetwork(state_dim, action_dim).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())
@@ -93,15 +85,34 @@ class DQNAgent:
         self.update_target_every = 100
         self.step_count = 0
 
+    def _ensure_history(self, state):
+        """
+        Ensure that the state has shape (seq_length, state_dim).
+        If a 1D state is provided (shape (state_dim,)), it is tiled to create a history.
+        """
+        state = np.array(state)
+        if state.ndim == 1:
+            # Tile the single timestep to form a history.
+            state = np.tile(state, (self.seq_length, 1))
+        elif state.shape[0] != self.seq_length:
+            # Optionally, you could pad or truncate.
+            # Here we simply repeat the first row until we reach seq_length.
+            pad_size = self.seq_length - state.shape[0]
+            if pad_size > 0:
+                pad = np.repeat(state[0:1, :], pad_size, axis=0)
+                state = np.concatenate([state, pad], axis=0)
+            else:
+                state = state[:self.seq_length, :]
+        return state
+
     def select_action(self, state):
         """
-        Selects an action using an epsilon-greedy policy.
-
-        Expects state to be a 2D array of shape (seq_length, state_dim), e.g. (1440, 1000).
-        A batch dimension is added.
+        Select an action using epsilon-greedy.
+        Expects state to be either a 1D array of length state_dim or a 2D array
+        of shape (seq_length, state_dim). It ensures the state has history.
         """
-        state = torch.FloatTensor(state).to(self.device)
-        # Now state is (seq_length, state_dim); add a batch dimension:
+        state = self._ensure_history(state)  # shape: (seq_length, state_dim)
+        state = torch.FloatTensor(state).to(self.device)  # (seq_length, state_dim)
         state = state.unsqueeze(0)  # (1, seq_length, state_dim)
         if np.random.rand() < self.epsilon:
             return np.random.randint(self.action_dim)
@@ -111,9 +122,10 @@ class DQNAgent:
 
     def store_transition(self, state, action, reward, next_state, done):
         """
-        Stores a transition. It is assumed that both state and next_state are 2D arrays
-        of shape (seq_length, state_dim).
+        Stores a transition. Ensures that both state and next_state have history.
         """
+        state = self._ensure_history(state)
+        next_state = self._ensure_history(next_state)
         self.buffer.append((state, action, reward, next_state, done))
         if len(self.buffer) > 10000:
             self.buffer.pop(0)
@@ -124,9 +136,8 @@ class DQNAgent:
         indices = np.random.choice(len(self.buffer), self.batch_size, replace=False)
         batch = [self.buffer[i] for i in indices]
         states, actions, rewards, next_states, dones = zip(*batch)
-        # Instead of unsqueezing, we expect states to already be (seq_length, state_dim).
-        # We need to stack them to shape (batch, seq_length, state_dim):
-        states = torch.from_numpy(np.stack(states)).float().to(self.device)  # (batch, seq_length, state_dim)
+        # Each state is (seq_length, state_dim); stacking gives (batch, seq_length, state_dim)
+        states = torch.from_numpy(np.stack(states)).float().to(self.device)
         next_states = torch.from_numpy(np.stack(next_states)).float().to(self.device)
         actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
