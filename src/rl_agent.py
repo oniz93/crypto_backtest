@@ -4,7 +4,8 @@ rl_agent.py
 This module defines the reinforcement learning (RL) agent.
 It implements a recurrent neural network using GRU layers (with an input projection layer)
 to capture dependencies in the data. Several training optimizations are included,
-such as gradient clipping, learning rate scheduling, and (optionally) mixed precision training.
+such as gradient clipping, learning rate scheduling, mixed precision training, and
+prioritized experience replay (PER).
 This agent is used within the genetic algorithm to evaluate individuals.
 """
 
@@ -12,6 +13,136 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+# ---------------------------
+# SumTree and Prioritized Replay Buffer Implementation
+# ---------------------------
+class SumTree:
+    """
+    A binary tree data structure where the parent’s value is the sum of its children.
+    Used to store priorities and sample them in O(log n) time.
+    """
+    def __init__(self, capacity):
+        self.capacity = capacity  # Number of leaf nodes (transitions)
+        self.tree = np.zeros(2 * capacity - 1)
+        self.data = np.empty(capacity, dtype=object)
+        self.write = 0
+        self.n_entries = 0
+
+    def add(self, priority, data):
+        """Add a new data point with its priority."""
+        tree_idx = self.write + self.capacity - 1
+        self.data[self.write] = data
+        self.update(tree_idx, priority)
+
+        self.write += 1
+        if self.write >= self.capacity:
+            self.write = 0
+
+        if self.n_entries < self.capacity:
+            self.n_entries += 1
+
+    def update(self, tree_idx, priority):
+        """Update the tree with a new priority and propagate the change."""
+        change = priority - self.tree[tree_idx]
+        self.tree[tree_idx] = priority
+
+        # Propagate the change through tree
+        while tree_idx != 0:
+            tree_idx = (tree_idx - 1) // 2
+            self.tree[tree_idx] += change
+
+    def get_leaf(self, s):
+        """
+        Find the leaf on the tree corresponding to the value s.
+        Returns: (tree index, priority, data)
+        """
+        idx = 0
+        while True:
+            left = 2 * idx + 1
+            right = left + 1
+            if left >= len(self.tree):
+                leaf_idx = idx
+                break
+            else:
+                if s <= self.tree[left]:
+                    idx = left
+                else:
+                    s -= self.tree[left]
+                    idx = right
+        data_idx = leaf_idx - self.capacity + 1
+        return leaf_idx, self.tree[leaf_idx], self.data[data_idx]
+
+    @property
+    def total_priority(self):
+        return self.tree[0]
+
+
+class PrioritizedReplayBuffer:
+    """
+    Prioritized Experience Replay buffer that uses a SumTree.
+    """
+    def __init__(self, capacity, alpha=0.6):
+        """
+        Parameters:
+            capacity (int): Maximum number of transitions to store.
+            alpha (float): How much prioritization is used (0 - no prioritization, 1 - full prioritization).
+        """
+        self.capacity = capacity
+        self.alpha = alpha
+        self.tree = SumTree(capacity)
+
+    def add(self, error, sample):
+        """
+        Add a new sample with priority based on error.
+        The priority is computed as (abs(error) + epsilon) ** alpha.
+        """
+        epsilon = 1e-6
+        priority = (abs(error) + epsilon) ** self.alpha
+        self.tree.add(priority, sample)
+
+    def sample(self, n, beta=0.4):
+        """
+        Sample a batch of n transitions.
+        beta: importance-sampling (IS) exponent (0 - no corrections, 1 - full correction).
+        Returns:
+            batch: list of transitions
+            idxs: list of tree indices for updating priorities later
+            is_weights: array of importance-sampling weights for the batch
+        """
+        batch = []
+        idxs = []
+        segment = self.tree.total_priority / n
+        is_weights = np.empty((n, 1), dtype=np.float32)
+
+        # To normalize IS weights, get the minimum probability
+        p_min = np.min(self.tree.tree[-self.tree.capacity:]) / self.tree.total_priority
+        max_weight = (p_min * n) ** (-beta)
+
+        for i in range(n):
+            a = segment * i
+            b = segment * (i + 1)
+            s = np.random.uniform(a, b)
+            idx, priority, data = self.tree.get_leaf(s)
+            sampling_prob = priority / self.tree.total_priority
+            is_weight = (sampling_prob * n) ** (-beta)
+            is_weight /= max_weight
+            batch.append(data)
+            idxs.append(idx)
+            is_weights[i, 0] = is_weight
+
+        return batch, idxs, is_weights
+
+    def update(self, idx, error):
+        """
+        Update the priority of a transition.
+        """
+        epsilon = 1e-6
+        priority = (abs(error) + epsilon) ** self.alpha
+        self.tree.update(idx, priority)
+
+    def __len__(self):
+        return self.tree.n_entries
 
 # ---------------------------
 # GRU-based Q-Network with Input Projection
@@ -62,13 +193,14 @@ class GRUQNetwork(nn.Module):
         return q_values, None
 
 # ---------------------------
-# DQN Agent with Optimizations
+# DQN Agent with Optimizations and Prioritized Replay Buffer
 # ---------------------------
 class DQNAgent:
     def __init__(self, state_dim, action_dim, lr=1e-2, gamma=0.90,
-                 epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01, seq_length=1440):
+                 epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01, seq_length=1440,
+                 buffer_capacity=10000, per_alpha=0.6, per_beta=0.4, per_beta_increment=0.001):
         """
-        DQN Agent using the GRU Q-Network with optimizations.
+        DQN Agent using the GRU Q-Network with optimizations and PER.
 
         Parameters:
             state_dim (int): Number of features per timestep.
@@ -79,6 +211,10 @@ class DQNAgent:
             epsilon_decay (float): Decay factor for exploration.
             epsilon_min (float): Minimum exploration rate.
             seq_length (int): History length (number of timesteps).
+            buffer_capacity (int): Capacity of the replay buffer.
+            per_alpha (float): Prioritization exponent.
+            per_beta (float): Initial importance-sampling exponent.
+            per_beta_increment (float): Increment for beta per update.
         """
         # Choose device.
         if torch.cuda.is_available():
@@ -101,18 +237,21 @@ class DQNAgent:
         self.target_net = GRUQNetwork(state_dim, action_dim).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())
         # Set up the optimizer.
-        # (Optionally, you might experiment with AdamW.)
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         # Add a learning rate scheduler.
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, factor=0.9, patience=10)
         # Optionally, initialize a GradScaler for mixed precision (if using CUDA).
         self.scaler = torch.cuda.amp.GradScaler() if self.device.type == "cuda" else None
 
-        # Initialize the replay buffer.
-        self.buffer = []
+        # Initialize the prioritized replay buffer.
+        self.buffer = PrioritizedReplayBuffer(buffer_capacity, alpha=per_alpha)
         self.batch_size = 64
         self.update_target_every = 100
         self.step_count = 0
+
+        # PER parameters.
+        self.per_beta = per_beta
+        self.per_beta_increment = per_beta_increment
 
     def _ensure_history(self, state):
         """
@@ -159,35 +298,42 @@ class DQNAgent:
 
     def store_transition(self, state, action, reward, next_state, done):
         """
-        Store a transition in the replay buffer.
-
-        Parameters:
-            state, next_state (np.array): States that will be processed.
-            action (int): Action taken.
-            reward (float): Reward received.
-            done (bool): Whether the episode has ended.
+        Store a transition in the prioritized replay buffer.
+        The initial priority is set to the maximum priority in the buffer (or 1 if the buffer is empty).
         """
         state = self._ensure_history(state)
         next_state = self._ensure_history(next_state)
-        self.buffer.append((state, action, reward, next_state, done))
-        if len(self.buffer) > 10000:
-            self.buffer.pop(0)
+        transition = (state, action, reward, next_state, done)
+        # Use max priority so that new transitions are likely to be sampled.
+        if len(self.buffer) > 0:
+            max_priority = np.max(self.buffer.tree.tree[-self.buffer.capacity:])
+            if max_priority == 0:
+                max_priority = 1.0
+        else:
+            max_priority = 1.0
+        self.buffer.add(max_priority, transition)
 
     def update_policy(self):
         """
-        Sample a batch from the replay buffer and update the network.
-        Applies gradient clipping, and uses mixed precision training if available.
+        Sample a batch from the replay buffer using PER, update the network, and update priorities.
+        Applies gradient clipping and uses mixed precision training if available.
         """
         if len(self.buffer) < self.batch_size:
             return  # Not enough samples yet
-        indices = np.random.choice(len(self.buffer), self.batch_size, replace=False)
-        batch = [self.buffer[i] for i in indices]
+
+        # Increase beta (for importance-sampling weights) gradually.
+        self.per_beta = np.min([1.0, self.per_beta + self.per_beta_increment])
+
+        batch, idxs, is_weights = self.buffer.sample(self.batch_size, beta=self.per_beta)
+
+        # Unpack batch transitions.
         states, actions, rewards, next_states, dones = zip(*batch)
         states = torch.from_numpy(np.stack(states)).float().to(self.device)  # (batch, seq_length, state_dim)
         next_states = torch.from_numpy(np.stack(next_states)).float().to(self.device)
         actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
         dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
+        is_weights = torch.FloatTensor(is_weights).to(self.device)
 
         self.optimizer.zero_grad()
 
@@ -200,21 +346,21 @@ class DQNAgent:
                     max_next_q, _ = self.target_net(next_states)
                     max_next_q = max_next_q.max(1)[0].unsqueeze(1)
                     target = rewards + self.gamma * max_next_q * (1 - dones)
-                loss = ((q_values - target) ** 2).mean()
+                td_errors = q_values - target
+                loss = (is_weights * (td_errors ** 2)).mean()
             self.scaler.scale(loss).backward()
-            # Gradient clipping.
             torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
-            # Standard precision training.
             q_values, _ = self.q_net(states)
             q_values = q_values.gather(1, actions)
             with torch.no_grad():
                 max_next_q, _ = self.target_net(next_states)
                 max_next_q = max_next_q.max(1)[0].unsqueeze(1)
                 target = rewards + self.gamma * max_next_q * (1 - dones)
-            loss = ((q_values - target) ** 2).mean()
+            td_errors = q_values - target
+            loss = (is_weights * (td_errors ** 2)).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
             self.optimizer.step()
@@ -228,6 +374,12 @@ class DQNAgent:
         # Decay the exploration rate.
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
+
+        # Update priorities in the replay buffer.
+        # Use the absolute TD error as the new priority.
+        td_errors_np = td_errors.detach().cpu().numpy().squeeze()
+        for idx, error in zip(idxs, td_errors_np):
+            self.buffer.update(idx, error)
 
     def save(self, path):
         """
@@ -249,9 +401,3 @@ class DQNAgent:
         self.q_net.load_state_dict(torch.load(path, map_location=self.device))
         self.target_net.load_state_dict(self.q_net.state_dict())
         print(f"RL Agent's weights loaded from {path}")
-
-# ---------------------------
-# Note:
-# For further optimization, consider integrating a prioritized experience replay buffer.
-# This file uses uniform sampling from the replay buffer.
-# ---------------------------
