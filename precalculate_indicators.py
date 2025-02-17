@@ -1,222 +1,184 @@
-# precalculate_indicators.py
+"""
+precalculate_indicators.py
+--------------------------
+This script precalculates technical indicators for different timeframes
+and saves the results to Feather (or optionally Parquet) files.
+It uses multiprocessing to parallelize the computation.
+"""
 
 import json
 import os
 from functools import partial
 from itertools import product
 from multiprocessing import Pool
-
 import pandas as pd
 from tqdm import tqdm
-
-# Import DataLoader from your src module
 from src.data_loader import DataLoader
 
-# Global variable to hold the shared DataFrame
+# Global variable for sharing tick data among worker processes.
 shared_tick_data = None
-
 
 def init_worker(tick_data):
     """
-    Initializes the worker by setting the global shared_tick_data.
-    This function is called once per worker process.
+    Worker initializer for multiprocessing.
+
+    Parameters:
+        tick_data: Shared tick data (a dictionary of DataFrames).
     """
     global shared_tick_data
     shared_tick_data = tick_data
 
-
 def load_indicator_config(config_file: str) -> dict:
     """
-    Loads the indicators configuration from a JSON file.
+    Load indicator configuration from a JSON file.
 
     Parameters:
-    - config_file (str): Path to the JSON configuration file.
+        config_file (str): Path to the JSON file.
 
     Returns:
-    - dict: Indicators configuration.
+        dict: Indicator configuration.
     """
     with open(config_file, 'r') as f:
         indicators = json.load(f)
     return indicators
 
-
 def has_float_params(params: dict) -> bool:
     """
-    Checks if any parameter in the params dict is of float type.
+    Check if any parameter range in the indicator configuration contains float values.
 
     Parameters:
-    - params (dict): Parameters dictionary.
+        params (dict): Indicator parameters.
 
     Returns:
-    - bool: True if any parameter has float type, False otherwise.
+        bool: True if any parameter is a float, else False.
     """
     for param_range in params.values():
-        # Check if any element in the list is a float
         if isinstance(param_range, list):
             if any(isinstance(val, float) for val in param_range):
                 return True
     return False
 
-
 def generate_parameter_combinations(params: dict, step: int = 5) -> list:
     """
-    Generates a list of parameter dictionaries based on the provided ranges.
+    Generate all combinations of indicator parameters given integer ranges.
 
     Parameters:
-    - params (dict): Parameters with their ranges.
-    - step (int, optional): Step size for integer parameters. Defaults to 5.
+        params (dict): Dictionary of indicator parameter ranges.
+        step (int): Step size for generating values.
 
     Returns:
-    - list: List of parameter dictionaries.
+        list: List of parameter dictionaries.
     """
     param_names = []
     param_values = []
-
     for param, range_vals in params.items():
         if isinstance(range_vals, list) and len(range_vals) == 2:
             low, high = range_vals
             if isinstance(low, int) and isinstance(high, int):
                 values = list(range(low, high + 1, step))
             else:
-                # Skip non-integer parameters
                 values = []
         else:
-            # Skip parameters that don't have a proper range
             values = []
-
         if values:
             param_names.append(param)
             param_values.append(values)
-
-    # Generate all combinations
+    # Create all possible combinations.
     combinations = [dict(zip(param_names, combo)) for combo in product(*param_values)]
     return combinations
 
-
 def create_filename(indicator_name: str, timeframe: str, params: dict) -> str:
     """
-    Creates a filename based on the indicator name, timeframe, and parameters.
+    Create a filename for the precalculated indicator file.
 
     Parameters:
-    - indicator_name (str): Name of the indicator.
-    - timeframe (str): Timeframe string (e.g., '1T', '5T').
-    - params (dict): Parameters dictionary.
+        indicator_name (str): Name of the indicator.
+        timeframe (str): Timeframe (e.g., '1min').
+        params (dict): Parameters used for calculation.
 
     Returns:
-    - str: Formatted filename.
+        str: A filename string.
     """
     if not params:
         filename = f"{indicator_name}-{timeframe}.feather"
     else:
         param_parts = [f"{key}-{value}" for key, value in params.items()]
         filename = f"{indicator_name}-{timeframe}-" + "-".join(param_parts) + ".feather"
-    # Replace any spaces or special characters if necessary
-    filename = filename.replace(" ", "_")
-    return filename
-
+    return filename.replace(" ", "_")
 
 def calculate_and_save_all_timeframes(indicator_info: tuple, output_dir: str, timeframes: list):
     """
-    Calculates an indicator across all specified timeframes, reshapes the data to 1-minute intervals,
-    and saves them as Parquet files.
+    Calculate an indicator for each timeframe and save the result to a file.
 
     Parameters:
-    - indicator_info (tuple): Tuple containing (indicator_name, params).
-    - output_dir (str): Directory to save the Parquet files.
-    - timeframes (list): List of timeframe strings.
+        indicator_info (tuple): (indicator_name, params)
+        output_dir (str): Directory to save the files.
+        timeframes (list): List of timeframe strings.
     """
     indicator_name, params = indicator_info
     for timeframe in timeframes:
         try:
-            # Access the shared tick_data
+            # Initialize a new DataLoader and use the shared tick data.
             data_loader = DataLoader()
-            data_loader.tick_data = shared_tick_data  # Assign shared data
-            data_loader.timeframes = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']  # Ensure timeframes match
-
-            # Calculate the indicator
+            data_loader.tick_data = shared_tick_data  # Use the global shared tick data.
+            data_loader.timeframes = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']
+            # Calculate the indicator.
             indicator_df = data_loader.calculate_indicator(indicator_name, params, timeframe)
             if indicator_df.empty:
                 print(f"Empty DataFrame for {indicator_name} with params {params} on {timeframe}. Skipping.")
                 continue
-
-            # Shift the index backward by the timeframe duration
+            # Shift the indicator data by the timeframe duration.
             shift_duration = pd.to_timedelta(timeframe)
             indicator_df_shifted = indicator_df.copy()
             indicator_df_shifted.index = indicator_df_shifted.index - shift_duration
-
-            # Resample to 1-minute intervals and forward-fill the indicator values
+            # Resample to 1-minute intervals and forward-fill missing data.
             indicator_df_1T = indicator_df_shifted.resample('1min').ffill()
-
-            # Drop any NaN values that may result from shifting
             indicator_df_1T.dropna(inplace=True)
-
-            # Generate filename
             filename = create_filename(indicator_name, timeframe, params)
             filepath = os.path.join(output_dir, filename)
-
-            # Save as Feather with Zstandard compression for efficiency
+            # Save the indicator DataFrame to a Feather file.
             indicator_df_1T.to_feather(filepath, compression='zstd')
-
-            # If you prefer Parquet, uncomment the following line and comment out the Feather line:
-            # indicator_df_1T.to_parquet(filepath, engine='pyarrow', compression='snappy')
-
         except Exception as e:
             print(f"Error processing {indicator_name} with params {params} on {timeframe}: {e}")
 
-
 def main():
-    # Configuration
-    indicators_config_file = 'indicators_config.json'  # JSON file containing indicators and parameters
+    """
+    Main function to precalculate technical indicators.
+    """
+    indicators_config_file = 'indicators_config.json'
     output_dir = 'precalculated_indicators_parquet'
     os.makedirs(output_dir, exist_ok=True)
-
-    # Load indicators configuration
     indicators = load_indicator_config(indicators_config_file)
-
-    # Define timeframes
     timeframes = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']
-
-    # Filter out indicators with float parameters
+    # Filter out indicators with float parameters.
     filtered_indicators = {name: params for name, params in indicators.items() if not has_float_params(params)}
-
     if not filtered_indicators:
         print("No indicators to process after filtering out those with float parameters.")
         return
-
-    # Initialize DataLoader and load data
+    # Load tick data.
     data_loader = DataLoader()
     data_loader.import_ticks()
     data_loader.resample_data()
-
-    # Assign the loaded data to a global variable for sharing
     global shared_tick_data
     shared_tick_data = data_loader.tick_data
-
-    # Generate all tasks: (indicator_name, params)
     tasks = []
+    # Generate tasks for each indicator and each parameter combination.
     for indicator_name, params in filtered_indicators.items():
-        param_combinations = generate_parameter_combinations(params, step=1)  # Adjust step as needed
+        param_combinations = generate_parameter_combinations(params, step=1)
         for param in param_combinations:
             tasks.append((indicator_name, param))
-
     if not tasks:
         print("No tasks generated. Check your indicators and parameter ranges.")
         return
-
-    # Define the number of processes
-    num_processes = 50  # Leave one CPU free
+    num_processes = 50
     print(f"Using {num_processes} processes for multiprocessing.")
-
-    # Create a partial function fixing output_dir and timeframes
+    from functools import partial
     worker = partial(calculate_and_save_all_timeframes, output_dir=output_dir, timeframes=timeframes)
-
-    # Initialize the Pool with the worker initializer
     with Pool(processes=num_processes, initializer=init_worker, initargs=(shared_tick_data,)) as pool:
-        # Use tqdm for progress bar
+        from tqdm import tqdm
+        # Use a progress bar to track tasks.
         list(tqdm(pool.imap_unordered(worker, tasks, chunksize=10), total=len(tasks)))
-
     print("Precalculation of indicators completed.")
-
 
 if __name__ == "__main__":
     main()

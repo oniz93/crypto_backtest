@@ -1,14 +1,32 @@
-# src/rl_environment.py
+"""
+rl_environment.py
+-----------------
+This module defines the TradingEnvironment class which simulates trading.
+It uses price data and technical indicators to simulate trading actions (buy, sell, hold)
+and computes rewards based on changes in portfolio value.
+It is designed to be used by the RL agent.
+"""
 
 import logging
 import numpy as np
 
+# Use the GeneticOptimizer logger for consistency.
 logger = logging.getLogger('GeneticOptimizer')
-
 
 class TradingEnvironment:
     def __init__(self, price_data, indicators, mode="long", initial_capital=100000,
                  transaction_cost=0.005, max_steps=500000):
+        """
+        Initialize the trading environment.
+
+        Parameters:
+            price_data (pd.DataFrame): DataFrame containing price data.
+            indicators (pd.DataFrame): DataFrame containing technical indicators.
+            mode (str): Trading mode ('long' or 'short').
+            initial_capital (float): Starting capital.
+            transaction_cost (float): Fractional transaction fee.
+            max_steps (int): Maximum number of timesteps to simulate.
+        """
         self.price_data = price_data
         self.indicators = indicators
         self.initial_capital = initial_capital
@@ -16,118 +34,130 @@ class TradingEnvironment:
         self.max_steps = max_steps
         self.mode = mode
 
-        # Merge price_data and indicators
+        # Merge price data and indicator data on their timestamps.
         self.data = price_data.join(indicators, how='inner').dropna()
         self.data = self.data.sort_index()
 
-        # Pre-convert the DataFrame for fast indexing:
-        #  - self.data_values: a NumPy array of all row values
-        #  - self.close_index: the index of the 'close' column in self.data
-        #  - self.timestamps_list: a list of timestamps for fast lookup
+        # Convert the DataFrame to a NumPy array for faster indexing.
         self.data_values = self.data.values
         self.columns = self.data.columns
+        # Find the column index for the closing price.
         self.close_index = self.data.columns.get_loc('close')
         self.n_steps = len(self.data_values)
+        # Store the timestamps as a list.
         self.timestamps_list = self.data.index.tolist()
 
-        # Calculate state dimension: original features + 5 extra fields
-        # (adjusted_buy_price, adjusted_sell_price, inventory, cash_ratio, entry_price)
+        # Define the dimension of the state vector:
+        # all columns from data plus 5 extra features.
         self.state_dim = self.data.shape[1] + 5
-        self.action_dim = 3  # 0=hold, 1=buy, 2=sell
+        self.action_dim = 3  # Actions: 0 = hold, 1 = buy, 2 = sell
 
         self.entry_price = 0.0
         self.reset()
 
     def reset(self):
+        """
+        Reset the environment to its initial state.
+
+        Returns:
+            np.array: The initial state vector.
+        """
         self.entry_price = 0.0
         self.current_step = 0
         self.cash = self.initial_capital
         self.inventory = 0
-        # Retrieve current close price directly from the NumPy array
+        # Set the current price from the first row.
         self.last_price = self.data_values[self.current_step][self.close_index]
         return self._get_state()
 
     def _get_state(self, step=None):
-        # Import the normalization functions from utils
-        from src.utils import normalize_price, normalize_volume, normalize_diff
+        """
+        Build the state vector for the given timestep.
 
+        The state vector includes:
+          - Normalized market features (e.g., price, volume).
+          - Extra features: normalized adjusted buy price, normalized adjusted sell price,
+            current inventory, cash ratio, and the normalized difference between current price and entry price.
+
+        Parameters:
+            step (int): Timestep index for which to generate the state.
+
+        Returns:
+            np.array: The state vector.
+        """
+        from src.utils import normalize_price, normalize_volume, normalize_diff
         if step is None:
             step = self.current_step
         if step < 0 or step >= self.n_steps:
             logger.error(f"Attempted to access step {step}, which is out of bounds.")
             raise IndexError("Step is out of bounds in _get_state.")
-
-        # Retrieve the row from the combined data (price + indicators)
+        # Get the row corresponding to the current timestep.
         row = self.data_values[step]
         norm_features = []
-        # Loop through each feature using the column names from self.data
+        # Normalize each feature based on its type.
         for col, val in zip(self.data.columns, row):
             if col in ['open', 'high', 'low', 'close']:
                 norm_features.append(normalize_price(val))
             elif col == 'volume':
                 norm_features.append(normalize_volume(val))
-            # If your indicator names indicate a price difference, normalize as a diff
             elif col.startswith('VWAP') or col.startswith('VWMA'):
                 norm_features.append(normalize_diff(val))
-            # For VPVR volume clusters, use volume normalization
             elif col.startswith('cluster_'):
                 norm_features.append(normalize_volume(val))
             else:
-                # For any other columns, leave as is (or add additional normalization if desired)
                 norm_features.append(val)
-
-        # Get the current close price (in raw scale) for further calculations
+        # Get the raw close price for extra calculations.
         close_price = row[self.close_index]
+        # Calculate adjusted buy and sell prices (including transaction cost).
         adjusted_buy_price = close_price * (1 + self.transaction_cost)
         adjusted_sell_price = close_price / (1 + self.transaction_cost)
         norm_adjusted_buy = normalize_price(adjusted_buy_price)
         norm_adjusted_sell = normalize_price(adjusted_sell_price)
-
-        # Create a new feature: normalized difference between current price and entry price.
-        # (This will be negative if the current price is below the entry price.)
+        # Calculate the difference from the entry price.
         entry_diff = close_price - self.entry_price
         norm_entry_diff = normalize_diff(entry_diff)
-
-        # You may choose to normalize inventory as well (here we leave it raw)
-        extra_features = [
-            norm_adjusted_buy,   # normalized adjusted buy price
-            norm_adjusted_sell,  # normalized adjusted sell price
-            self.inventory,      # inventory (you might later choose to normalize this)
-            self.cash / self.initial_capital,  # cash ratio (already between 0 and 1)
-            norm_entry_diff      # normalized price difference (current - entry)
-        ]
-
-        # Return the state vector as the concatenation of normalized features and extra features
+        # Extra features include these calculated values.
+        extra_features = [norm_adjusted_buy, norm_adjusted_sell, self.inventory,
+                          self.cash / self.initial_capital, norm_entry_diff]
+        # Return the concatenated state vector.
         return np.concatenate([np.array(norm_features), np.array(extra_features)])
 
     def step(self, action):
-        # Get the current price and portfolio value before any action.
+        """
+        Execute an action (buy, sell, or hold) and advance one timestep.
+
+        Parameters:
+            action (int): 0 (hold), 1 (buy), or 2 (sell).
+
+        Returns:
+            tuple: (next_state, reward, done, info)
+                - next_state: The state after the action.
+                - reward: The reward obtained.
+                - done (bool): Whether the simulation has finished.
+                - info (dict): Additional info such as the current step.
+        """
+        # Get the current price and compute the portfolio value before the action.
         current_price = self.data_values[self.current_step][self.close_index]
         portfolio_before = self.cash + self.inventory * current_price
-
-        # For logging purposes.
         current_timestamp = self.timestamps_list[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
+        penalty = 0.0  # Initialize a penalty variable
+        trade_fraction = 0.1  # Fraction of cash to use per trade
 
-        # Initialize a penalty variable.
-        penalty = 0.0
-        # Define a fraction of cash to use in each trade.
-        trade_fraction = 0.1
-
-        # --- Process Actions Based on Mode ---
+        # Process actions based on the mode (long or short)
         if self.mode == "long":
-            if action == 1:  # BUY
-                # If already short, buying is an invalid move.
+            if action == 1:  # Buy action
                 if self.inventory < 0:
-                    penalty = 0.02 * portfolio_before  # 2% penalty of current portfolio.
+                    # Cannot buy if in a short position; apply penalty.
+                    penalty = 0.02 * portfolio_before
                 else:
                     buy_usd = trade_fraction * self.cash
-                    # If the available cash is too little to trade, assign a small penalty.
                     if buy_usd < 100:
-                        penalty = 0.01 * portfolio_before
+                        penalty = 0.01 * portfolio_before  # Not enough cash; small penalty.
                     else:
+                        # Calculate the number of units to buy.
                         qty = (buy_usd / current_price) * (1 - self.transaction_cost)
-                        # If already holding a long position, update the weighted average entry price.
                         if self.inventory > 0:
+                            # Update the weighted average entry price.
                             old_value = self.inventory * self.entry_price
                             new_value = qty * current_price
                             total_qty = self.inventory + qty
@@ -136,9 +166,8 @@ class TradingEnvironment:
                         else:
                             self.entry_price = current_price
                             self.inventory += qty
-                        self.cash -= buy_usd
-
-            elif action == 2:  # SELL (Close Long Position)
+                        self.cash -= buy_usd  # Deduct cash used for purchase
+            elif action == 2:  # Sell action (to close a long position)
                 if self.inventory <= 0:
                     penalty = 0.02 * portfolio_before
                 else:
@@ -147,10 +176,8 @@ class TradingEnvironment:
                     self.cash += proceeds_after_cost
                     self.inventory = 0.0
                     self.entry_price = 0.0
-            # Action 0 (hold) does nothing.
-
         elif self.mode == "short":
-            if action == 1:  # Open/Add Short Position
+            if action == 1:  # Open or add to short position
                 if self.inventory > 0:
                     penalty = 0.02 * portfolio_before
                 else:
@@ -169,8 +196,7 @@ class TradingEnvironment:
                             self.entry_price = current_price
                             self.inventory -= qty
                         self.cash -= sell_usd
-
-            elif action == 2:  # Buy to Cover Short Position
+            elif action == 2:  # Buy to cover a short position
                 if self.inventory >= 0:
                     penalty = 0.02 * portfolio_before
                 else:
@@ -182,13 +208,10 @@ class TradingEnvironment:
                         self.cash -= cost_after_cost
                         self.inventory = 0.0
                         self.entry_price = 0.0
-            # Hold does nothing.
 
-        # --- Step to the Next Time Period ---
+        # Advance to the next timestep.
         next_step = self.current_step + 1
         done = next_step >= self.n_steps or next_step >= self.max_steps
-
-        # Try to obtain the new price (if we're not at the end).
         if not done:
             try:
                 new_price = self.data_values[next_step][self.close_index]
@@ -199,31 +222,28 @@ class TradingEnvironment:
         else:
             new_price = current_price
 
-        # Compute the portfolio value after the action.
         portfolio_after = self.cash + self.inventory * new_price
-        # The reward is the net change in portfolio value minus any penalties.
+        # Reward is the change in portfolio value minus any penalty.
         reward = (portfolio_after - portfolio_before) - penalty
 
-        # Build the next state.
+        # Get the next state.
         if not done:
             try:
                 next_state = self._get_state(next_step)
             except IndexError:
-                logger.error(f"Failed to get next state for step {next_step}. Setting to zeros.")
+                logger.error(f"Failed to get next state for step {next_step}. Setting state to zeros.")
                 next_state = np.zeros(self.state_dim)
         else:
             next_state = np.zeros(self.state_dim)
 
-        # Update the current step.
         self.current_step = next_step
         if self.current_step % 1000 == 0:
             logger.debug(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after} - Done: {done}")
 
-        # Terminal condition: if the portfolio falls below 50% of the initial capital.
+        # If portfolio value falls below 75% of initial capital, end the simulation.
         if portfolio_after < 0.75 * self.initial_capital:
             logger.warning(f"Portfolio value below 75% initial: {portfolio_after}")
             done = True
-            reward -= 0.05 * portfolio_before  # additional terminal penalty
+            reward -= 0.05 * portfolio_before
 
         return next_state, reward, done, {"n_step": next_step}
-

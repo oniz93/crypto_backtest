@@ -1,6 +1,12 @@
-# src/genetic_optimizer.py
+"""
+genetic_optimizer.py
+--------------------
+This module implements a genetic algorithm (GA) optimizer for trading strategy parameters.
+It uses the DEAP library to evolve a population of individuals (parameter sets) and evaluates
+them by running reinforcement learning (RL) training on each individual.
+It also supports distributed evaluation using Ray or local multiprocessing.
+"""
 
-import datetime
 import gc
 import json
 import logging
@@ -11,28 +17,26 @@ import sys
 import numpy as np
 import pandas as pd
 from deap import base, creator, tools
-
 import ray
 from multiprocessing import Pool
-
 from src.config_loader import Config
 from src.data_loader import DataLoader
 
+# Set up logging for the GeneticOptimizer.
 logger = logging.getLogger('GeneticOptimizer')
 logger.setLevel(logging.DEBUG)
 
-# Console Handler
+# Add a console handler so messages are printed to standard output.
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# Optional: You could remove or keep the Named Pipe Handler if you want logging to a pipe
+# Optionally add a named pipe handler for logging.
 pipe_path = '/tmp/genetic_optimizer_logpipe'
 if not os.path.exists(pipe_path):
     os.mkfifo(pipe_path)
-
 try:
     pipe = open(pipe_path, 'w')
     pipe_handler = logging.StreamHandler(pipe)
@@ -42,208 +46,247 @@ try:
 except Exception as e:
     logger.error(f"Failed to open named pipe {pipe_path}: {e}")
 
-
 @ray.remote
 def ray_evaluate_individual(pickled_class, individual):
     """
-    Evaluate one individual using a 'GeneticOptimizer' or the relevant evaluate method.
-    We call pickled_class.evaluate_individual(individual).
+    Remote function for evaluating one individual in the GA using Ray.
+
+    Parameters:
+        pickled_class: An instance of GeneticOptimizer (pickled for remote execution).
+        individual: The individual (list of parameter values) to evaluate.
+
+    Returns:
+        A tuple with fitness, average profit, and (optionally) an RL agent.
     """
+    # Simply call the evaluate_individual method of the provided optimizer.
     return pickled_class.evaluate_individual(individual)
 
-
 def local_evaluate_individual(args):
+    """
+    Evaluate a single individual locally using multiprocessing.
+
+    Parameters:
+        args: A tuple containing (optimizer, individual).
+
+    Returns:
+        The result of evaluating the individual.
+    """
     optimizer, individual = args
     return optimizer.evaluate_individual(individual)
 
-
 class GeneticOptimizer:
-    def __init__(
-        self,
-        data_loader: DataLoader,
-        session_id=None,
-        gen=None,
-        indicators_dir='precalculated_indicators_parquet',
-        checkpoint_dir='checkpoints',
-        checkpoint_file=None
-    ):
+    def __init__(self, data_loader: DataLoader, session_id=None, gen=None,
+                 indicators_dir='precalculated_indicators_parquet',
+                 checkpoint_dir='checkpoints', checkpoint_file=None):
         """
-        :param data_loader: DataLoader instance
-        :param session_id: string for the GA session
-        :param gen: if not None, load population from that generation
-                              else we minimize
+        Initialize the GeneticOptimizer.
+
+        Parameters:
+            data_loader (DataLoader): Instance for loading and processing market data.
+            session_id (str): Unique identifier for the GA session.
+            gen (int): Generation number to load population from; if None, start fresh.
+            indicators_dir (str): Directory for pre-calculated indicators.
+            checkpoint_dir (str): Directory for saving checkpoints.
+            checkpoint_file (str): Optional checkpoint file to resume training.
         """
         self.data_loader = data_loader
         self.indicators_dir = indicators_dir
         self.checkpoint_dir = checkpoint_dir
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
-        self.config = Config()
+        os.makedirs(self.checkpoint_dir, exist_ok=True)  # Ensure checkpoint directory exists
+        self.config = Config()  # Load configuration settings
 
-        # Store the unique session_id for this entire training run
+        # Save a unique session id.
         self.session_id = session_id if session_id else "unknown-session"
-        self.gen = gen  # generation to load
+        self.gen = gen
 
-        # define indicators
+        # Define the technical indicators and parameter ranges.
         self.indicators = self.define_indicators()
         self.model_params = {
             'threshold_buy': (0.5, 0.9),
             'threshold_sell': (0.5, 0.9)
         }
+        # Create a mapping for parameters to indices.
         self.parameter_indices = self.create_parameter_indices()
+        # Prepare base price data.
         self.prepare_data()
 
-        # Setup DEAP
+        # Setup DEAP (genetic algorithm framework).
         self.setup_deap()
 
-        # Optionally load checkpoint
+        # Optionally, load a checkpoint to resume a previous run.
         if checkpoint_file:
             self.load_checkpoint(checkpoint_file)
 
     def define_indicators(self):
-        # return {
-        #     'sma': {'length': (5, 200)},
-        #     'ema': {'length': (5, 200)},
-        #     'rsi': {'length': (5, 30)},
-        #     'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
-        #     'atr': {'length': (5, 50)},
-        #     'stoch': {'k': (5, 20), 'd': (3, 10)},
-        # }
+        """
+        Define the technical indicators and their parameter ranges.
+
+        Returns:
+            dict: Dictionary of indicators.
+        """
+        # For example, here we define VWAP, VWMA, VPVR, RSI, MACD with specific parameter ranges.
         return {
             'vwap': {'offset': (0, 50)},
             'vwma': {'length': (5, 200)},
             'vpvr': {
-                '1min':{'width': (1000, 50000)},
-                '5min':{'width': (200, 10000)},
-                '15min':{'width': (100, 3500)},
-                '30min':{'width': (50, 2000)},
-                '1h':{'width': (30, 1000)},
-                '4h':{'width': (10, 250)},
-                '1d':{'width': (10, 60)},
+                '1min': {'width': (1000, 50000)},
+                '5min': {'width': (200, 10000)},
+                '15min': {'width': (100, 3500)},
+                '30min': {'width': (50, 2000)},
+                '1h': {'width': (30, 1000)},
+                '4h': {'width': (10, 250)},
+                '1d': {'width': (10, 60)},
             },
             'rsi': {'length': (5, 30)},
             'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
         }
 
     def create_parameter_indices(self):
+        """
+        Create a mapping of each parameter to a unique index in an individual.
+
+        Returns:
+            dict: Mapping with keys as parameter tuples and values as indices.
+        """
         parameter_indices = {}
         idx = 0
+        # Define the supported timeframes.
         self.timeframes = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']
         for indicator_name, data in self.indicators.items():
-            # data might look like: {'offset': (0,50)}  OR  {'1min': {'width':(...), ...}, '5min': {...}}
             if isinstance(data, dict):
-                # Check if ALL keys are recognized timeframes
-                # e.g. set(data.keys()) <= set(['1min','5min','15min',...])
+                # Check if the keys in the indicator configuration are timeframes.
                 if set(data.keys()).issubset(set(self.timeframes)):
-                    # => The user gave us per-timeframe params
                     for tf, param_dict in data.items():
-                        # param_dict e.g. {'width': (1000,200000), ...}
                         for param_name, (low, high) in param_dict.items():
                             parameter_indices[(indicator_name, param_name, tf)] = idx
                             idx += 1
                 else:
-                    # => The user gave us a flat param dict for all timeframes
-                    #    e.g. {'offset': (0,50)}
+                    # If parameters are not separated by timeframe, assign them to all timeframes.
                     for param_name, (low, high) in data.items():
                         for tf in self.timeframes:
                             parameter_indices[(indicator_name, param_name, tf)] = idx
                             idx += 1
             else:
                 raise ValueError(f"Indicators config for '{indicator_name}' must be a dict, got {type(data)}")
-
-        # Finally, add our model params
+        # Add model-specific parameters.
         for param_name in self.model_params.keys():
             parameter_indices[('model', param_name)] = idx
             idx += 1
-
         return parameter_indices
 
     def prepare_data(self):
+        """
+        Load and save the base price data for the primary timeframe.
+        """
         base_tf = self.data_loader.base_timeframe
-        self.base_price_data = self.data_loader.tick_data[base_tf].copy()
+        self.base_price_data = self.data_loader.tick_data[base_tf].copy()  # Create a copy for safety
 
     def setup_deap(self):
-        # By default DEAP tries to *minimize* the fitness
-        # We'll keep that, but if we are maximizing, we invert sign in evaluate_individual
+        """
+        Initialize the DEAP framework by creating the Individual and Fitness classes,
+        and registering genetic operators.
+        """
+        # Create a fitness class that we want to minimize.
         creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+        # Create an Individual class which is a list with a fitness attribute.
         creator.create("Individual", list, fitness=creator.FitnessMin)
-
         self.toolbox = base.Toolbox()
+        # Register the function to create an individual.
         self.toolbox.register("individual", self.init_ind, creator.Individual)
+        # Register a population generator.
         self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
-
+        # Register crossover, mutation, and selection operators.
         self.toolbox.register("mate", tools.cxTwoPoint)
         self.toolbox.register("mutate", tools.mutGaussian, mu=0.0, sigma=0.1, indpb=0.1)
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
     def init_ind(self, icls):
         """
-        Creates a single individual with random parameters from the parameter range.
+        Create a single individual with random parameter values.
+
+        Parameters:
+            icls: The Individual class from DEAP.
+
+        Returns:
+            An instance of the individual.
         """
         keys = list(self.parameter_indices.keys())
         ind = []
+        # Iterate over each parameter and choose a random value in the range.
         for k in keys:
             if k[0] == 'model':
-                # k = ('model', 'threshold_buy')
+                # For model parameters (e.g., threshold_buy), get the defined range.
                 low, high = self.model_params[k[1]]
             else:
-                # k = (indicator_name, param_name, timeframe)
+                # For indicators, extract the parameter range for the given timeframe.
                 indicator_name, param_name, timeframe = k
                 indicator_dict = self.indicators[indicator_name]
-
                 if set(indicator_dict.keys()).issubset(set(self.timeframes)):
-                    # => "indicator_dict" is a per-timeframe dict
-                    # e.g.  { '1min': {'width': (1000,200000)}, '5min': {...} }
                     low, high = indicator_dict[timeframe][param_name]
                 else:
-                    # => "indicator_dict" is a single dict of param ranges
-                    # e.g.  {'offset': (0,50)}
                     low, high = indicator_dict[param_name]
-
-            if isinstance(low, int):
-                val = random.randint(low, high)
-            else:
-                val = random.uniform(low, high)
+            # Use randint if the range is integer, else use uniform for floats.
+            val = random.randint(low, high) if isinstance(low, int) else random.uniform(low, high)
             ind.append(val)
-
         return icls(ind)
 
     def evaluate_individual(self, individual):
         """
-        Evaluate an individual:
-          - build config from the individual's parameters
-          - run RL training
+        Evaluate an individual by:
+          1. Converting the individual's parameter list into a configuration.
+          2. Computing technical indicators based on that configuration.
+          3. Running RL training on a trading environment using the computed indicators.
+
+        Parameters:
+            individual: A list of parameter values representing a candidate solution.
+
+        Returns:
+            Tuple (fitness, avg_profit, agent) where fitness is used for GA selection.
         """
+        # Convert the list of values into a configuration dictionary.
         config = self.extract_config_from_individual(individual)
         logger.info("Start creating features for individual...")
+        # Calculate technical indicators based on the configuration.
         indicators = self.load_indicators(config)
+        # Prepare the features DataFrame by joining base price data with the indicator data.
         features_df = self.prepare_features(indicators)
 
+        # Check if there is enough data.
         if len(features_df) < 100:
             logger.warning("Not enough data to run RL.")
-            # For a short population, fitness is poor
-            return (9999999.0,), 0.0, None  # or large positive if we are minimizing
+            return (9999999.0,), 0.0, None
 
         if 'close' not in features_df.columns:
             logger.error("'close' column missing in features_df.")
             return (9999999.0,), 0.0, None
 
+        # Extract price data and other indicator data.
         price_data = features_df[['close']]
         indicators_only = features_df.drop(columns=['close'], errors='ignore')
-
+        # Create the trading environment.
         env = self.create_environment(price_data, indicators_only)
 
         logger.info("Start training RL agent...")
+        # Run RL training and obtain the average profit.
         agent, avg_profit = self.run_rl_training(env, episodes=1000)
-
-        # If we are maximizing profit, but GA is a minimizer => return negative
+        # Return negative profit as fitness if the GA is minimizing.
         return (-avg_profit,), avg_profit, agent
 
     def extract_config_from_individual(self, individual):
+        """
+        Build a configuration dictionary from an individual's parameter values.
+
+        Parameters:
+            individual: List of parameter values.
+
+        Returns:
+            dict: Dictionary containing 'indicator_params' and 'model_params'.
+        """
         config = {}
         indicator_params = {}
         model_params = {}
-
         keys = list(self.parameter_indices.keys())
+        # Map each value to its corresponding parameter key.
         for i, val in enumerate(individual):
             key = keys[i]
             if key[0] == 'model':
@@ -255,22 +298,28 @@ class GeneticOptimizer:
                 if timeframe not in indicator_params[indicator_name]:
                     indicator_params[indicator_name][timeframe] = {}
                 indicator_params[indicator_name][timeframe][param_name] = val
-
         config['indicator_params'] = indicator_params
         config['model_params'] = model_params
         return config
 
     def load_indicators(self, config):
+        """
+        Compute technical indicator DataFrames based on the configuration.
+
+        Parameters:
+            config (dict): Contains indicator parameters.
+
+        Returns:
+            dict: Dictionary mapping indicator names to their DataFrames.
+        """
         indicator_params = config['indicator_params']
         indicators = {}
-
+        # For each indicator, compute the DataFrame for each timeframe.
         for indicator_name, timeframes_params in indicator_params.items():
             indicators[indicator_name] = {}
-
             for timeframe, params in timeframes_params.items():
                 indicator_df = self.data_loader.calculate_indicator(indicator_name, params, timeframe)
-
-                # If not 1min, shift & resample so it lines up with base 1-minute data
+                # If timeframe is not 1min, adjust the index so that data aligns with 1min bars.
                 if timeframe != '1min':
                     shift_duration = pd.to_timedelta(timeframe)
                     indicator_df_shifted = indicator_df.copy()
@@ -278,40 +327,35 @@ class GeneticOptimizer:
                     indicator_df_1min = indicator_df_shifted.resample('1min').ffill()
                     indicator_df_1min.dropna(inplace=True)
                     indicator_df = indicator_df_1min
-
-                # Store under the *actual* timeframe key (e.g. "5min", "15min", etc.)
                 indicators[indicator_name][timeframe] = indicator_df
-
         return indicators
 
     def prepare_features(self, indicators):
         """
-        Concatenate all timeframe data into a single DataFrame at 1-minute resolution.
-        We keep the base self.base_price_data as the foundation (which is 1min bars).
+        Concatenate the base price data with all indicator DataFrames to create a unified features DataFrame.
+
+        Parameters:
+            indicators (dict): Dictionary of indicator DataFrames.
+
+        Returns:
+            pd.DataFrame: Features DataFrame with 1-minute resolution.
         """
+        # Start with the base price data.
         features_df = self.base_price_data.copy()
-
-        # For each indicator (e.g. 'vwap', 'vwma', 'vpvr')...
+        # Loop over each indicator and join its DataFrame.
         for indicator_name, tf_dict in indicators.items():
-            # And for each timeframe (e.g. '1min', '5min', '15min', etc.)
             for timeframe, df in tf_dict.items():
-                # 1) Clean column names (remove any \n, trailing spaces)
+                # Remove any unwanted characters from column names.
                 df.columns = [col.replace('\n', '').strip() for col in df.columns]
-
-                # 2) Reindex to the base_price_data's index => ensures alignment at 1min
+                # Align the indicator DataFrame with the base data index.
                 df = df.reindex(features_df.index, method='ffill')
-
-                # 3) Add a suffix that includes indicator_name + timeframe
-                #    e.g. "VWAP" => "VWAP_vwap_5min"
+                # Append a suffix so the column name includes the indicator name and timeframe.
                 df = df.add_suffix(f'_{indicator_name}_{timeframe}')
-
-                # 4) Join them into features_df
+                # Join the indicator data to the features.
                 features_df = features_df.join(df)
-
-        # Drop rows with NaNs from any newly joined columns
+        # Drop any rows with missing values.
         features_df.dropna(inplace=True)
-
-        # Finally, respect the date range from the config
+        # Filter the DataFrame based on the simulation start and end dates from the config.
         filtered = self.data_loader.filter_data_by_date(
             features_df,
             self.config.get('start_simulation'),
@@ -320,106 +364,136 @@ class GeneticOptimizer:
         return filtered
 
     def create_environment(self, price_data, indicators):
-        from src.rl_environment import TradingEnvironment
+        """
+        Create a TradingEnvironment instance using price data and indicator data.
 
-        initial_capital = 100000
-        transaction_cost = 0.005
+        Parameters:
+            price_data (pd.DataFrame): Price data DataFrame.
+            indicators (pd.DataFrame): Indicator data DataFrame.
+
+        Returns:
+            TradingEnvironment: A new trading environment.
+        """
+        from src.rl_environment import TradingEnvironment
+        initial_capital = 100000  # Starting capital
+        transaction_cost = 0.005  # Transaction fee percentage
         mode = self.config.get('training_mode')
-        return TradingEnvironment(
-            price_data,
-            indicators,
-            initial_capital=initial_capital,
-            transaction_cost=transaction_cost,
-            mode=mode
-        )
+        # Create and return the environment instance.
+        return TradingEnvironment(price_data, indicators, initial_capital=initial_capital,
+                                  transaction_cost=transaction_cost, mode=mode)
 
     def run_rl_training(self, env, episodes=10):
+        """
+        Run reinforcement learning training on the trading environment.
+
+        Parameters:
+            env: TradingEnvironment instance.
+            episodes (int): Number of episodes for training.
+
+        Returns:
+            tuple: (agent, avg_profit) from training.
+        """
         from src.rl_agent import DQNAgent
         seq_length = self.config.get('seq_length', 1440)
+        # Create the RL agent with the given history length.
         agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-2, seq_length=seq_length)
         total_rewards = []
+        # Loop through each episode.
         for ep in range(episodes):
-            state = env.reset()
+            state = env.reset()  # Reset the environment
             done = False
             ep_reward = 0.0
+            # Continue until the episode ends.
             while not done:
-                action = agent.select_action(state)
-                next_state, reward, done, info = env.step(action)
-                agent.store_transition(state, action, reward, next_state, done)
-                agent.update_policy()
-                state = next_state
-                ep_reward += reward
-                last_step = info.get('n_step', 0)
-            ep_reward += last_step
+                action = agent.select_action(state)  # Decide on an action using epsilon-greedy policy
+                next_state, reward, done, info = env.step(action)  # Execute action and get new state and reward
+                agent.store_transition(state, action, reward, next_state, done)  # Store transition in replay buffer
+                agent.update_policy()  # Update the neural network using a batch from the buffer
+                state = next_state  # Move to next state
+                ep_reward += reward  # Accumulate reward
+                last_step = info.get('n_step', 0)  # Get any additional step info
+            ep_reward += last_step  # Optionally adjust reward based on last step
             total_rewards.append(ep_reward)
-            logger.info(f"One training done. Reward: {ep_reward} - Last step: {last_step}")
-
+            logger.info(f"Episode {ep} completed. Reward: {ep_reward} - Last step: {last_step}")
+        # Compute the average reward over all episodes.
         avg_reward = np.mean(total_rewards)
         return agent, avg_reward
 
     def evaluate_individuals(self, individuals):
         """
-        Evaluate a list of individuals using the processing method specified in the config.
+        Evaluate a list of individuals (parameter sets) using Ray or local multiprocessing.
+
+        Parameters:
+            individuals (list): List of individuals.
+
+        Returns:
+            list: List of evaluation results.
         """
         processing = self.config.get("processing", "ray").lower()
         if processing == "ray":
             if not ray.is_initialized():
                 ray.init(ignore_reinit_error=True)
+            # Use Ray to evaluate each individual in parallel.
             tasks = [ray_evaluate_individual.remote(self, ind) for ind in individuals]
             results = ray.get(tasks)
         elif processing == "local":
+            # Use local multiprocessing to evaluate individuals.
             with Pool() as pool:
                 results = pool.map(local_evaluate_individual, [(self, ind) for ind in individuals])
         else:
+            # Fallback: evaluate sequentially.
             results = [self.evaluate_individual(ind) for ind in individuals]
         return results
 
     def run(self):
-        NGEN = 100
-        CXPB = 0.5
-        MUTPB = 0.1
-
+        """
+        Main method to run the genetic algorithm optimization.
+        Evolves a population over many generations and saves the best performing RL agent(s).
+        """
+        NGEN = 100        # Number of generations
+        CXPB = 0.5        # Crossover probability
+        MUTPB = 0.1       # Mutation probability
         INITIAL_POPULATION = 100
 
+        # Ensure directories for saving population and weights exist.
         os.makedirs(f"population/{self.session_id}", exist_ok=True)
         os.makedirs(f"weights/{self.session_id}", exist_ok=True)
 
+        # If a generation is specified, load that population; otherwise, create a new one.
         if self.gen is not None:
-            # load population from file
             pop = self.load_population(self.session_id, self.gen)
             if not pop:
-                # if it's empty or not found, fallback to generating
                 pop = self.toolbox.population(n=INITIAL_POPULATION)
         else:
-            # default create population
             pop = self.toolbox.population(n=INITIAL_POPULATION)
 
         logger.info("Evaluating initial population...")
         results = self.evaluate_individuals(pop)
+        # Assign fitness, average profit, and agent to each individual.
         for ind, (fit, avg_profit, agent) in zip(pop, results):
             ind.fitness.values = fit
             ind.avg_profit = avg_profit
             ind.agent = agent
 
+        # Start the evolution process over generations.
         for gen in range(1, NGEN + 1):
             logger.info(f"=== Generation {gen} ===")
-
-            # after gen=1, we want 100 individuals, for example
+            # Increase population size after the first generation.
             desired_pop_size = 1000 if gen > 1 else INITIAL_POPULATION
-
             offspring = self.toolbox.select(pop, desired_pop_size)
+            # Clone the offspring to avoid altering originals.
             offspring = list(map(self.toolbox.clone, offspring))
-
+            # Apply crossover.
             for child1, child2 in zip(offspring[::2], offspring[1::2]):
                 if random.random() < CXPB:
                     self.toolbox.mate(child1, child2)
                     del child1.fitness.values, child2.fitness.values
-
+            # Apply mutation.
             for mutant in offspring:
                 if random.random() < MUTPB:
                     self.toolbox.mutate(mutant)
                     del mutant.fitness.values
-
+            # Evaluate all individuals that have lost a valid fitness.
             invalid_inds = [ind for ind in offspring if not ind.fitness.valid]
             logger.info(f"Evaluating {len(invalid_inds)} individuals with {self.config.get('processing', 'ray')} processing...")
             results = self.evaluate_individuals(invalid_inds)
@@ -427,10 +501,10 @@ class GeneticOptimizer:
                 ind.fitness.values = fit
                 ind.avg_profit = avg_profit
                 ind.agent = agent
-
+            # Update the population.
             pop[:] = offspring
 
-            # Save population to JSON
+            # Save the current population to a JSON file.
             pop_file = f"population/{self.session_id}/gen{gen}.json"
             population_data = []
             for i, ind in enumerate(pop):
@@ -443,14 +517,14 @@ class GeneticOptimizer:
             with open(pop_file, 'w') as f:
                 json.dump(population_data, f, indent=2)
 
+            # Find the best individual.
             best_ind = tools.selBest(pop, 1)[0]
             best_fitness = best_ind.fitness.values[0]
             best_reward = getattr(best_ind, 'avg_profit', None)
             best_agent = getattr(best_ind, 'agent', None)
-
             logger.info(f"Best Fitness: {best_fitness} | Best Reward: {best_reward}")
 
-            # Save RL agent if profit > 100000
+            # Save the RL agent's weights if it has achieved a high profit.
             for ind_id, ind in enumerate(pop):
                 agent_to_save = getattr(ind, 'agent', None)
                 ind_profit = getattr(ind, 'avg_profit', 0)
@@ -460,96 +534,82 @@ class GeneticOptimizer:
                     weight_file = f"weights/{self.session_id}/gen{gen}-{use_id}-{use_profit}.pth"
                     agent_to_save.save(weight_file)
                     logger.info(f"Saved RL agent's weights to {weight_file} because profit {ind_profit} > 100000")
-
+            # Clean up agent objects to save memory.
             for ind in pop:
                 if hasattr(ind, 'agent'):
                     del ind.agent
             gc.collect()
-
             logger.info(f"Generation {gen} completed. Best fitness: {best_fitness} | Best reward: {best_reward}")
 
         logger.info("DEAP Optimization Completed")
 
     def load_population(self, session_id: str, generation_number: int):
         """
-        Load a population from a saved JSON file under population/{session_id}/gen{generation_number}.json
-        and return a list of Individuals. The individuals will have their parameters set,
-        but fitness is cleared (they'll need re-evaluation).
+        Load a saved population from a JSON file.
+
+        Parameters:
+            session_id (str): Session identifier.
+            generation_number (int): Generation number to load.
+
+        Returns:
+            list: List of individuals.
         """
         pop_file = f"population/{session_id}/gen{generation_number}.json"
         if not os.path.exists(pop_file):
             logger.warning(f"Population file {pop_file} not found.")
             return []
-
         with open(pop_file, 'r') as f:
             population_data = json.load(f)
-
-        # We'll create an empty population of the right length
         pop = []
         for item in population_data:
-            params = item['parameters']  # list of floats
+            params = item['parameters']
             ind = creator.Individual(params)
-            # We won't set fitness here => we'll re-evaluate
             pop.append(ind)
-
         logger.info(f"Loaded population of size {len(pop)} from {pop_file}")
         return pop
 
     def load_checkpoint(self, checkpoint_file):
         """
-        Stub: not implementing global resume from file here.
+        Stub for loading a checkpoint.
+        (Not implemented here.)
         """
         pass
 
     def test_individual(self, individual_params=None):
+        """
+        Stub for testing a single individual.
+        (Not implemented here.)
+        """
         pass
 
     def debug_single_individual(self, individual_params=None):
         """
-        Debug a single individual WITHOUT using Ray or the GA loop.
-        Use this method to step through the code with breakpoints in your IDE.
+        Debug a single individual without running the full GA loop.
 
-        :param individual_params: list of parameter values, same length as self.parameter_indices
-                                 or None => create random
-        """
+        Parameters:
+            individual_params: Optional list of parameter values.
 
-        """
-        TODO: Genera e esporta individui di esempio e focalizzati su rl_environment per otimmizzare il più possibile il training
+        Returns:
+            Tuple (fitness, avg_profit, agent).
         """
         from deap import creator
-
-        # 1) If not provided, create random parameters
         if individual_params is None:
             keys = list(self.parameter_indices.keys())
             individual_params = []
+            # Generate random parameters for each key.
             for k in keys:
                 if k[0] == 'model':
-                    # k = ('model', 'threshold_buy')
                     low, high = self.model_params[k[1]]
                 else:
-                    # k = (indicator_name, param_name, timeframe)
                     indicator_name, param_name, timeframe = k
                     indicator_dict = self.indicators[indicator_name]
-
                     if set(indicator_dict.keys()).issubset(set(self.timeframes)):
-                        # => "indicator_dict" is a per-timeframe dict
-                        # e.g.  { '1min': {'width': (1000,200000)}, '5min': {...} }
                         low, high = indicator_dict[timeframe][param_name]
                     else:
-                        # => "indicator_dict" is a single dict of param ranges
-                        # e.g.  {'offset': (0,50)}
                         low, high = indicator_dict[param_name]
-
-                if isinstance(low, int):
-                    val = random.randint(low, high)
-                else:
-                    val = random.uniform(low, high)
+                val = random.randint(low, high) if isinstance(low, int) else random.uniform(low, high)
                 individual_params.append(val)
-
-        # 2) Create a DEAP Individual
         ind = creator.Individual(individual_params)
-
-        # 3) Evaluate directly
         logger.info("=== Debugging single individual ===")
         fit, avg_profit, agent = self.evaluate_individual(ind)
         logger.info(f"Evaluation finished. Fit: {fit}, Profit: {avg_profit}")
@@ -557,5 +617,4 @@ class GeneticOptimizer:
             logger.info("An RL agent was created; you can place breakpoints inside run_rl_training or environment.")
         else:
             logger.info("No RL agent was created (possibly not enough data).")
-
         return fit, avg_profit, agent
