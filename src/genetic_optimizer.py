@@ -214,6 +214,7 @@ class GeneticOptimizer:
           - run RL training
         """
         config = self.extract_config_from_individual(individual)
+        logger.info("Start creating features for individual...")
         indicators = self.load_indicators(config)
         features_df = self.prepare_features(indicators)
 
@@ -230,6 +231,8 @@ class GeneticOptimizer:
         indicators_only = features_df.drop(columns=['close'], errors='ignore')
 
         env = self.create_environment(price_data, indicators_only)
+
+        logger.info("Start training RL agent...")
         agent, avg_profit = self.run_rl_training(env, episodes=1000)
 
         # If we are maximizing profit, but GA is a minimizer => return negative

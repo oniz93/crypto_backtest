@@ -7,8 +7,8 @@ import torch.optim as optim
 
 class CombinedQNetwork(nn.Module):
     def __init__(self, state_dim, action_dim,
-                 hidden_size_lstm=512, hidden_size_gru=512,
-                 lstm_layers=2, gru_layers=2):
+                 hidden_size_lstm=256, hidden_size_gru=256,
+                 lstm_layers=1, gru_layers=1):
         """
         A Q-network that combines an LSTM layer followed by a GRU layer.
         Both layers process a history of timesteps (e.g. 1440 timestamps).
