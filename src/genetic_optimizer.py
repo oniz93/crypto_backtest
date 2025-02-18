@@ -51,15 +51,15 @@ except Exception as e:
 def ray_evaluate_individual(pickled_class, individual):
     """
     Remote function for evaluating one individual in the GA using Ray.
-
+    Simply calls evaluate_individual on the provided GeneticOptimizer instance.
+    
     Parameters:
-        pickled_class: An instance of GeneticOptimizer (pickled for remote execution).
-        individual: The individual (list of parameter values) to evaluate.
-
+        pickled_class: An instance of GeneticOptimizer.
+        individual: A list of parameter values.
+    
     Returns:
-        A tuple with fitness, average profit, and (optionally) an RL agent.
+        A tuple (fitness, avg_profit, agent).
     """
-    # Simply call the evaluate_individual method of the provided optimizer.
     return pickled_class.evaluate_individual(individual)
 
 def local_evaluate_individual(args):
@@ -236,55 +236,57 @@ class GeneticOptimizer:
         Evaluate an individual by:
           1. Converting the individual's parameter list into a configuration.
           2. Computing technical indicators based on that configuration.
-          3. Running RL training on a trading environment using the computed indicators.
-
+          3. Running RL training (using the same training logic as in run_rl_training)
+             on a trading environment built from the computed indicators.
+        
         Parameters:
             individual: A list of parameter values representing a candidate solution.
-
+            useLocal (bool): If True, attempt to load precomputed indicator features from file.
+        
         Returns:
-            Tuple (fitness, avg_profit, agent) where fitness is used for GA selection.
+            Tuple (fitness, avg_profit, agent), where fitness is negative average profit (to be minimized).
         """
-        # Convert the list of values into a configuration dictionary.
+        # Convert individual parameters into a configuration dictionary.
         config = self.extract_config_from_individual(individual)
-        if(useLocal):
-            hash = hashlib.md5(str(individual).encode()).hexdigest()
-            features_file = f"features/{hash}.parquet"
+        
+        # Optionally load precomputed features if available.
+        if useLocal:
+            # Use a hash of the individual's parameters as a filename.
+            hash_str = hashlib.md5(str(individual).encode()).hexdigest()
+            features_file = f"features/{hash_str}.parquet"
             if os.path.exists(features_file):
                 logger.info("Loading indicator features from file...")
                 features_df = pd.read_parquet(features_file)
             else:
-                logger.info("Start creating features for individual...")
-                # Calculate technical indicators based on the configuration.
+                logger.info("Computing indicator features for individual (local mode)...")
                 indicators = self.load_indicators(config)
-                # Prepare the features DataFrame by joining base price data with the indicator data.
                 features_df = self.prepare_features(indicators)
                 features_df.to_parquet(features_file)
         else:
-            logger.info("Start creating features for individual...")
-            # Calculate technical indicators based on the configuration.
+            logger.info("Computing indicator features for individual...")
             indicators = self.load_indicators(config)
-            # Prepare the features DataFrame by joining base price data with the indicator data.
             features_df = self.prepare_features(indicators)
-
-        # Check if there is enough data.
+        
+        # Check if there is sufficient data to run RL training.
         if len(features_df) < 100:
             logger.warning("Not enough data to run RL.")
             return (9999999.0,), 0.0, None
-
+        
         if 'close' not in features_df.columns:
             logger.error("'close' column missing in features_df.")
             return (9999999.0,), 0.0, None
-
-        # Extract price data and other indicator data.
+        
+        # Extract price data and the rest of the indicator data.
         price_data = features_df[['close']]
         indicators_only = features_df.drop(columns=['close'], errors='ignore')
-        # Create the trading environment.
+        
+        # Create the trading environment using the extracted data.
         env = self.create_environment(price_data, indicators_only)
-
-        logger.info("Start training RL agent...")
-        # Run RL training and obtain the average profit.
+        
+        logger.info("Starting RL training for individual...")
+        # Run the RL training using the same logic as in run_rl_training.
         agent, avg_profit = self.run_rl_training(env, episodes=1000)
-        # Return negative profit as fitness if the GA is minimizing.
+        # Fitness is defined as negative average profit (since GA minimizes fitness).
         return (-avg_profit,), avg_profit, agent
 
     def extract_config_from_individual(self, individual):

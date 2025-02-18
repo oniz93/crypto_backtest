@@ -255,7 +255,7 @@ class DQNAgent:
 
         self.optimizer.zero_grad()
         if self.scaler is not None:
-            with torch.amp.autocast():
+            with torch.amp.autocast(device_type=self.device):
                 q_values, _ = self.q_net(states)
                 q_values = q_values.gather(1, actions)
                 with torch.no_grad():
