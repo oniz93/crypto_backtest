@@ -398,39 +398,49 @@ class GeneticOptimizer:
                                   transaction_cost=transaction_cost, mode=mode)
 
     def run_rl_training(self, env, episodes=10):
-        """
-        Run reinforcement learning training on the trading environment.
-
-        Parameters:
-            env: TradingEnvironment instance.
-            episodes (int): Number of episodes for training.
-
-        Returns:
-            tuple: (agent, avg_profit) from training.
-        """
         from src.rl_agent import DQNAgent
         seq_length = self.config.get('seq_length', 1440)
-        # Create the RL agent with the given history length.
         agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-2, seq_length=seq_length)
         total_rewards = []
-        # Loop through each episode.
+        # Get chunk training parameters from the config.
+        chunk_size = self.config.get('chunk_size', 4000)
+        chunk_epochs = self.config.get('chunk_epochs', 1)  # Number of passes over each chunk
+
         for ep in range(episodes):
-            state = env.reset()  # Reset the environment
+            state = env.reset()
             done = False
             ep_reward = 0.0
-            # Continue until the episode ends.
+            chunk_buffer = []  # list to accumulate transitions
             while not done:
-                action = agent.select_action(state)  # Decide on an action using epsilon-greedy policy
-                next_state, reward, done, info = env.step(action)  # Execute action and get new state and reward
-                agent.store_transition(state, action, reward, next_state, done)  # Store transition in replay buffer
-                agent.update_policy()  # Update the neural network using a batch from the buffer
-                state = next_state  # Move to next state
-                ep_reward += reward  # Accumulate reward
-                last_step = info.get('n_step', 0)  # Get any additional step info
-            ep_reward += last_step  # Optionally adjust reward based on last step
+                action = agent.select_action(state)
+                next_state, reward, done, info = env.step(action)
+                # Also store transition in the agent's replay buffer (if you wish to keep that)
+                agent.store_transition(state, action, reward, next_state, done)
+                # And append the transition to our chunk buffer.
+                chunk_buffer.append((state, action, reward, next_state, done))
+                state = next_state
+                ep_reward += reward
+                last_step = info.get('n_step', 0)
+                # When we have accumulated a full chunk, perform training on it.
+                if len(chunk_buffer) >= chunk_size:
+                    random.shuffle(chunk_buffer)
+                    # For a number of epochs, iterate over mini-batches
+                    for _ in range(chunk_epochs):
+                        for i in range(0, len(chunk_buffer), agent.batch_size):
+                            mini_batch = chunk_buffer[i:i + agent.batch_size]
+                            agent.update_policy_from_batch(mini_batch)
+                    # Clear the chunk buffer after training.
+                    chunk_buffer = []
+            # After the episode, if any transitions remain in the chunk, train on them.
+            if len(chunk_buffer) > 0:
+                random.shuffle(chunk_buffer)
+                for _ in range(chunk_epochs):
+                    for i in range(0, len(chunk_buffer), agent.batch_size):
+                        mini_batch = chunk_buffer[i:i + agent.batch_size]
+                        agent.update_policy_from_batch(mini_batch)
+            ep_reward += last_step
             total_rewards.append(ep_reward)
             logger.info(f"Episode {ep} completed. Reward: {ep_reward} - Last step: {last_step}")
-        # Compute the average reward over all episodes.
         avg_reward = np.mean(total_rewards)
         return agent, avg_reward
 
@@ -453,7 +463,7 @@ class GeneticOptimizer:
             results = ray.get(tasks)
         elif processing == "local":
             # Use local multiprocessing to evaluate individuals.
-            with Pool() as pool:
+            with Pool(processes=self.config.get("num_processes", 4)) as pool:
                 results = pool.map(local_evaluate_individual, [(self, ind) for ind in individuals])
         else:
             # Fallback: evaluate sequentially.

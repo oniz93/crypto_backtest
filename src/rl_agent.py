@@ -395,6 +395,54 @@ class DQNAgent:
         for idx, error in zip(idxs, td_errors_np):
             self.buffer.update(idx, error)
 
+    def update_policy_from_batch(self, batch):
+        """
+        Update the network using a given mini-batch of transitions.
+        Each transition is a tuple: (state, action, reward, next_state, done)
+        This method ensures that each state is converted into a 2D array with shape
+        (seq_length, state_dim) if it is not already.
+        """
+        # Process each transition to ensure the state and next_state have the correct shape.
+        processed_batch = []
+        for state, action, reward, next_state, done in batch:
+            state = self._ensure_history(state)
+            next_state = self._ensure_history(next_state)
+            processed_batch.append((state, action, reward, next_state, done))
+
+        states, actions, rewards, next_states, dones = zip(*processed_batch)
+        states = torch.from_numpy(np.stack(states)).float().to(self.device)  # (batch, seq_length, state_dim)
+        next_states = torch.from_numpy(np.stack(next_states)).float().to(self.device)
+        actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
+        rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
+        dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
+
+        self.optimizer.zero_grad()
+
+        if self.scaler is not None:
+            with torch.amp.autocast("cuda"):
+                q_values, _ = self.q_net(states)
+                q_values = q_values.gather(1, actions)
+                with torch.no_grad():
+                    max_next_q, _ = self.target_net(next_states)
+                    max_next_q = max_next_q.max(1)[0].unsqueeze(1)
+                    target = rewards + self.gamma * max_next_q * (1 - dones)
+                loss = ((q_values - target) ** 2).mean()
+            self.scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            q_values, _ = self.q_net(states)
+            q_values = q_values.gather(1, actions)
+            with torch.no_grad():
+                max_next_q, _ = self.target_net(next_states)
+                max_next_q = max_next_q.max(1)[0].unsqueeze(1)
+                target = rewards + self.gamma * max_next_q * (1 - dones)
+            loss = ((q_values - target) ** 2).mean()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
+            self.optimizer.step()
+
     def save(self, path):
         """
         Save the Q-network weights to a file.
