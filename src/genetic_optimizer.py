@@ -236,26 +236,22 @@ class GeneticOptimizer:
         Evaluate an individual by:
           1. Converting the individual's parameter list into a configuration.
           2. Computing technical indicators based on that configuration.
-          3. Running RL training (using the same training logic as in run_rl_training)
-             on a trading environment built from the computed indicators.
-        
+          3. Splitting the dataset into chunks and running RL training on each chunk in random order.
+
         Parameters:
             individual: A list of parameter values representing a candidate solution.
             useLocal (bool): If True, attempt to load precomputed indicator features from file.
-        
+
         Returns:
             Tuple (fitness, avg_profit, agent), where fitness is negative average profit (to be minimized).
         """
-        # Convert individual parameters into a configuration dictionary.
+        # Build configuration dictionary from the individual's parameters.
         config = self.extract_config_from_individual(individual)
-        
-        # Optionally load precomputed features if available.
         if useLocal:
-            # Use a hash of the individual's parameters as a filename.
             hash_str = hashlib.md5(str(individual).encode()).hexdigest()
             features_file = f"features/{hash_str}.parquet"
             if os.path.exists(features_file):
-                logger.info("Loading indicator features from file...")
+                logger.info("Loading precomputed indicator features from file...")
                 features_df = pd.read_parquet(features_file)
             else:
                 logger.info("Computing indicator features for individual (local mode)...")
@@ -266,27 +262,25 @@ class GeneticOptimizer:
             logger.info("Computing indicator features for individual...")
             indicators = self.load_indicators(config)
             features_df = self.prepare_features(indicators)
-        
-        # Check if there is sufficient data to run RL training.
+
         if len(features_df) < 100:
             logger.warning("Not enough data to run RL.")
             return (9999999.0,), 0.0, None
-        
+
         if 'close' not in features_df.columns:
             logger.error("'close' column missing in features_df.")
             return (9999999.0,), 0.0, None
-        
-        # Extract price data and the rest of the indicator data.
+
+        # Extract price and indicator data.
         price_data = features_df[['close']]
         indicators_only = features_df.drop(columns=['close'], errors='ignore')
-        
-        # Create the trading environment using the extracted data.
+        # Create the trading environment.
         env = self.create_environment(price_data, indicators_only)
-        
-        logger.info("Starting RL training for individual...")
-        # Run the RL training using the same logic as in run_rl_training.
-        agent, avg_profit = self.run_rl_training(env, episodes=1000)
-        # Fitness is defined as negative average profit (since GA minimizes fitness).
+
+        logger.info("Starting RL training for individual using dataset-level chunking...")
+        # Use our updated RL training function that chunks the dataset.
+        agent, avg_profit = self.run_rl_training(env, episodes=1)
+        # Return negative average profit as fitness (since GA minimizes fitness).
         return (-avg_profit,), avg_profit, agent
 
     def extract_config_from_individual(self, individual):
@@ -399,51 +393,79 @@ class GeneticOptimizer:
         return TradingEnvironment(price_data, indicators, initial_capital=initial_capital,
                                   transaction_cost=transaction_cost, mode=mode)
 
-    def run_rl_training(self, env, episodes=10):
+    def run_rl_training(self, env, episodes=1):
+        """
+        Run reinforcement learning training on the trading environment using dataset-level chunking.
+        The entire dataset in env.data is partitioned into chunks (of rows) of size chunk_size.
+        The order of chunks is shuffled and for each chunk an episode is simulated.
+
+        Parameters:
+            env: The trading environment instance.
+            episodes (int): Number of passes (episodes) over the dataset chunks.
+
+        Returns:
+            tuple: (agent, avg_reward) where agent is the trained RL agent and
+                   avg_reward is the average reward across chunks.
+        """
         from src.rl_agent import DQNAgent
         seq_length = self.config.get('seq_length', 1440)
+        # Initialize the RL agent.
         agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-2, seq_length=seq_length)
         total_rewards = []
-        # Get chunk training parameters from the config.
+        # Get chunk parameters from the config.
         chunk_size = self.config.get('chunk_size', 4000)
-        chunk_epochs = self.config.get('chunk_epochs', 1)  # Number of passes over each chunk
+        last_step = 0
 
-        for ep in range(episodes):
+        # The environment's merged DataFrame is stored in env.data.
+        full_data = env.data.copy()
+        all_indices = full_data.index
+        # Split the indices into chunks of chunk_size rows.
+        num_chunks = int(np.ceil(len(all_indices) / chunk_size))
+        chunk_indices = [all_indices[i * chunk_size:(i + 1) * chunk_size] for i in range(num_chunks)]
+        # Shuffle the list of chunks (do not shuffle within chunks).
+        random.shuffle(chunk_indices)
+
+        # Save the original environment attributes to restore later.
+        orig_data = env.data
+        orig_values = env.data_values
+        orig_n_steps = env.n_steps
+        orig_timestamps = env.timestamps_list
+
+        # Process each chunk as a separate "episode".
+        for i, indices in enumerate(chunk_indices):
+            logger.info(f"Training on chunk {i + 1}/{len(chunk_indices)} (size {len(indices)} rows)...")
+            # Create a new DataFrame for this chunk.
+            chunk_df = full_data.loc[indices]
+            # Update the environment with the chunk data.
+            env.data = chunk_df
+            env.data_values = chunk_df.values
+            env.n_steps = len(chunk_df)
+            env.timestamps_list = list(chunk_df.index)
+
             state = env.reset()
             done = False
-            ep_reward = 0.0
-            chunk_buffer = []  # list to accumulate transitions
+            chunk_reward = 0.0
+            # Run one episode on the chunk.
             while not done:
                 action = agent.select_action(state)
                 next_state, reward, done, info = env.step(action)
-                # Also store transition in the agent's replay buffer (if you wish to keep that)
                 agent.store_transition(state, action, reward, next_state, done)
-                # And append the transition to our chunk buffer.
-                chunk_buffer.append((state, action, reward, next_state, done))
+                agent.update_policy_from_batch([(state, action, reward, next_state, done)])
                 state = next_state
-                ep_reward += reward
                 last_step = info.get('n_step', 0)
-                # When we have accumulated a full chunk, perform training on it.
-                if len(chunk_buffer) >= chunk_size:
-                    random.shuffle(chunk_buffer)
-                    # For a number of epochs, iterate over mini-batches
-                    for _ in range(chunk_epochs):
-                        for i in range(0, len(chunk_buffer), agent.batch_size):
-                            mini_batch = chunk_buffer[i:i + agent.batch_size]
-                            agent.update_policy_from_batch(mini_batch)
-                    # Clear the chunk buffer after training.
-                    chunk_buffer = []
-            # After the episode, if any transitions remain in the chunk, train on them.
-            if len(chunk_buffer) > 0:
-                random.shuffle(chunk_buffer)
-                for _ in range(chunk_epochs):
-                    for i in range(0, len(chunk_buffer), agent.batch_size):
-                        mini_batch = chunk_buffer[i:i + agent.batch_size]
-                        agent.update_policy_from_batch(mini_batch)
-            ep_reward += last_step
-            total_rewards.append(ep_reward)
-            logger.info(f"Episode {ep} completed. Reward: {ep_reward} - Last step: {last_step}")
+                chunk_reward += reward
+            chunk_reward += last_step
+            total_rewards.append(chunk_reward)
+            logger.info(f"Chunk {i + 1} completed. Reward: {chunk_reward} - Last step: {last_step}")
+
+        # Restore the original environment data.
+        env.data = orig_data
+        env.data_values = orig_values
+        env.n_steps = orig_n_steps
+        env.timestamps_list = orig_timestamps
+
         avg_reward = np.mean(total_rewards)
+        logger.info(f"RL training over chunks completed. Average reward: {avg_reward}")
         return agent, avg_reward
 
     def evaluate_individuals(self, individuals):

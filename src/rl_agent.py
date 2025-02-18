@@ -322,7 +322,7 @@ class DQNAgent:
 
         # Use mixed precision training if available
         if self.scaler is not None:
-            with torch.amp.autocast():
+            with torch.amp.autocast(device_type=self.device.type):
                 # Forward pass: Get Q-values for current states
                 q_values, _ = self.q_net(states)
                 q_values = q_values.gather(1, actions)  # Select Q-values for taken actions
