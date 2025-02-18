@@ -5,7 +5,8 @@ This module defines the reinforcement learning (RL) agent.
 It implements a recurrent neural network using GRU layers (with an input projection layer)
 to capture dependencies in the data. Several training optimizations are included,
 such as gradient clipping, learning rate scheduling, mixed precision training, and
-prioritized experience replay (PER).
+prioritized experience replay (PER). In this version, Numba is used to accelerate
+the inner loop of the SumTree for PER.
 This agent is used within the genetic algorithm to evaluate individuals.
 """
 
@@ -13,6 +14,32 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from numba import njit
+
+# ---------------------------
+# Numba-accelerated helper functions for SumTree
+# ---------------------------
+@njit
+def numba_get_leaf_idx(tree, s):
+    """Return the leaf index in the tree for a given cumulative sum s."""
+    idx = 0
+    total = tree.shape[0]
+    while True:
+        left = 2 * idx + 1
+        if left >= total:
+            return idx
+        if s <= tree[left]:
+            idx = left
+        else:
+            s -= tree[left]
+            idx = left + 1
+
+@njit
+def numba_propagate(tree, tree_idx, change):
+    """Propagate a change in priority from tree_idx up to the root."""
+    while tree_idx != 0:
+        tree_idx = (tree_idx - 1) // 2
+        tree[tree_idx] += change
 
 # ---------------------------
 # SumTree and Prioritized Replay Buffer Implementation
@@ -24,7 +51,7 @@ class SumTree:
     """
     def __init__(self, capacity):
         self.capacity = capacity  # Number of leaf nodes (transitions)
-        self.tree = np.zeros(2 * capacity - 1)
+        self.tree = np.zeros(2 * capacity - 1, dtype=np.float64)
         self.data = np.empty(capacity, dtype=object)
         self.write = 0
         self.n_entries = 0
@@ -34,11 +61,9 @@ class SumTree:
         tree_idx = self.write + self.capacity - 1
         self.data[self.write] = data
         self.update(tree_idx, priority)
-
         self.write += 1
         if self.write >= self.capacity:
             self.write = 0
-
         if self.n_entries < self.capacity:
             self.n_entries += 1
 
@@ -46,30 +71,15 @@ class SumTree:
         """Update the tree with a new priority and propagate the change."""
         change = priority - self.tree[tree_idx]
         self.tree[tree_idx] = priority
-
-        # Propagate the change through tree
-        while tree_idx != 0:
-            tree_idx = (tree_idx - 1) // 2
-            self.tree[tree_idx] += change
+        # Use Numba-accelerated propagation.
+        numba_propagate(self.tree, tree_idx, change)
 
     def get_leaf(self, s):
         """
         Find the leaf on the tree corresponding to the value s.
         Returns: (tree index, priority, data)
         """
-        idx = 0
-        while True:
-            left = 2 * idx + 1
-            right = left + 1
-            if left >= len(self.tree):
-                leaf_idx = idx
-                break
-            else:
-                if s <= self.tree[left]:
-                    idx = left
-                else:
-                    s -= self.tree[left]
-                    idx = right
+        leaf_idx = numba_get_leaf_idx(self.tree, s)
         data_idx = leaf_idx - self.capacity + 1
         return leaf_idx, self.tree[leaf_idx], self.data[data_idx]
 
