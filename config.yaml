@@ -9,6 +9,7 @@ treshold_price: 0.00001
 processing: local
 seq_length: 60
 timing: false
-chunk_size: 4000
+chunk_size: 15000
+episodes: 20
 chunk_epochs: 10
 num_processes: 10

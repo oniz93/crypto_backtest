@@ -279,7 +279,7 @@ class GeneticOptimizer:
 
         logger.info("Starting RL training for individual using dataset-level chunking...")
         # Use our updated RL training function that chunks the dataset.
-        agent, avg_profit = self.run_rl_training(env, episodes=1)
+        agent, avg_profit = self.run_rl_training(env, episodes=self.config.get('episodes', 20))
         # Return negative average profit as fitness (since GA minimizes fitness).
         return (-avg_profit,), avg_profit, agent
 
@@ -396,67 +396,69 @@ class GeneticOptimizer:
     def run_rl_training(self, env, episodes=1):
         """
         Run reinforcement learning training on the trading environment using dataset-level chunking.
-        The entire dataset in env.data is partitioned into chunks (of rows) of size chunk_size.
-        The order of chunks is shuffled and for each chunk an episode is simulated.
+        For each episode, the entire dataset (env.data) is split into chunks (of rows) of size chunk_size.
+        The list of chunks is shuffled and the agent is trained on each chunk sequentially.
+        This process is repeated for the specified number of episodes.
 
         Parameters:
             env: The trading environment instance.
-            episodes (int): Number of passes (episodes) over the dataset chunks.
+            episodes (int): Number of complete passes (episodes) over the dataset chunks.
 
         Returns:
             tuple: (agent, avg_reward) where agent is the trained RL agent and
-                   avg_reward is the average reward across chunks.
+                   avg_reward is the average reward across episodes.
         """
         from src.rl_agent import DQNAgent
         seq_length = self.config.get('seq_length', 1440)
-        # Initialize the RL agent.
+        # Initialize the RL agent once.
         agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-2, seq_length=seq_length)
         total_rewards = []
-        # Get chunk parameters from the config.
         chunk_size = self.config.get('chunk_size', 4000)
-        last_step = 0
 
-        # The environment's merged DataFrame is stored in env.data.
-        full_data = env.data.copy()
-        all_indices = full_data.index
-        # Split the indices into chunks of chunk_size rows.
-        num_chunks = int(np.ceil(len(all_indices) / chunk_size))
-        chunk_indices = [all_indices[i * chunk_size:(i + 1) * chunk_size] for i in range(num_chunks)]
-        # Shuffle the list of chunks (do not shuffle within chunks).
-        random.shuffle(chunk_indices)
-
-        # Save the original environment attributes to restore later.
+        # Save original environment data so we can restore it later.
         orig_data = env.data
         orig_values = env.data_values
         orig_n_steps = env.n_steps
         orig_timestamps = env.timestamps_list
 
-        # Process each chunk as a separate "episode".
-        for i, indices in enumerate(chunk_indices):
-            logger.info(f"Training on chunk {i + 1}/{len(chunk_indices)} (size {len(indices)} rows)...")
-            # Create a new DataFrame for this chunk.
-            chunk_df = full_data.loc[indices]
-            # Update the environment with the chunk data.
-            env.data = chunk_df
-            env.data_values = chunk_df.values
-            env.n_steps = len(chunk_df)
-            env.timestamps_list = list(chunk_df.index)
+        # Get the full dataset (merged DataFrame).
+        full_data = env.data.copy()
+        all_indices = full_data.index
 
-            state = env.reset()
-            done = False
-            chunk_reward = 0.0
-            # Run one episode on the chunk.
-            while not done:
-                action = agent.select_action(state)
-                next_state, reward, done, info = env.step(action)
-                agent.store_transition(state, action, reward, next_state, done)
-                agent.update_policy_from_batch([(state, action, reward, next_state, done)])
-                state = next_state
+        # Run the specified number of episodes.
+        for ep in range(episodes):
+            # Split the indices into chunks and shuffle the chunk order.
+            num_chunks = int(np.ceil(len(all_indices) / chunk_size))
+            chunk_indices = [all_indices[i * chunk_size:(i + 1) * chunk_size] for i in range(num_chunks)]
+            random.shuffle(chunk_indices)
+            ep_reward = 0.0
+
+            # Process each chunk as a separate sub-episode.
+            for i, indices in enumerate(chunk_indices):
+                logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{len(chunk_indices)} (size {len(indices)} rows)...")
+                chunk_df = full_data.loc[indices]
+                # Update the environment with the chunk's data.
+                env.data = chunk_df
+                env.data_values = chunk_df.values
+                env.n_steps = len(chunk_df)
+                env.timestamps_list = list(chunk_df.index)
+                # Reset the environment for this chunk.
+                state = env.reset()
+                done = False
+                info = None
+                while not done:
+                    action = agent.select_action(state)
+                    next_state, reward, done, info = env.step(action)
+                    agent.store_transition(state, action, reward, next_state, done)
+                    agent.update_policy_from_batch([(state, action, reward, next_state, done)])
+                    state = next_state
+                    ep_reward += reward
+                # Optionally add the last step reward.
                 last_step = info.get('n_step', 0)
-                chunk_reward += reward
-            chunk_reward += last_step
-            total_rewards.append(chunk_reward)
-            logger.info(f"Chunk {i + 1} completed. Reward: {chunk_reward} - Last step: {last_step}")
+                ep_reward += last_step
+                logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {ep_reward} (last step: {last_step})")
+            total_rewards.append(ep_reward)
+            logger.info(f"Episode {ep + 1} completed. Total episode reward: {ep_reward}")
 
         # Restore the original environment data.
         env.data = orig_data
@@ -465,7 +467,7 @@ class GeneticOptimizer:
         env.timestamps_list = orig_timestamps
 
         avg_reward = np.mean(total_rewards)
-        logger.info(f"RL training over chunks completed. Average reward: {avg_reward}")
+        logger.info(f"RL training over {episodes} episodes completed. Average reward: {avg_reward}")
         return agent, avg_reward
 
     def evaluate_individuals(self, individuals):

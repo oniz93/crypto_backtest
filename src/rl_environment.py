@@ -114,8 +114,11 @@ class TradingEnvironment:
         norm_adjusted_buy = normalize_price(adjusted_buy_price)
         norm_adjusted_sell = normalize_price(adjusted_sell_price)
         # Calculate the difference from the entry price.
-        entry_diff = close_price - self.entry_price
-        norm_entry_diff = normalize_diff(entry_diff)
+        if self.entry_price == 0.0:
+            norm_entry_diff = 0.0
+        else:
+            entry_diff = self.entry_price - close_price
+            norm_entry_diff = normalize_diff(entry_diff)
         # Extra features include these calculated values.
         extra_features = [norm_adjusted_buy, norm_adjusted_sell, self.inventory,
                           self.cash / self.initial_capital, norm_entry_diff]
@@ -245,5 +248,8 @@ class TradingEnvironment:
             logger.warning(f"Portfolio value below 75% initial: {portfolio_after}")
             done = True
             reward -= 0.05 * portfolio_before
+
+        if done and portfolio_after > self.initial_capital:
+            reward = abs(reward) * 2
 
         return next_state, reward, done, {"n_step": next_step}
