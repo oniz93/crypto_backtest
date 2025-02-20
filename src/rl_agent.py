@@ -37,6 +37,7 @@ class HybridQNetwork(nn.Module):
             num_gru_layers (int): Number of GRU layers.
         """
         super(HybridQNetwork, self).__init__()
+        self.state_dim = state_dim  # Save the input dimension to later access extra features.
         # The input state is expected in shape: (batch, seq_length, state_dim).
         # We first permute it to (batch, state_dim, seq_length) so that we can apply 1D convolutions along the time axis.
 
@@ -91,6 +92,12 @@ class HybridQNetwork(nn.Module):
         Returns:
             tuple: (q_values, hidden_state) where q_values is of shape (batch, action_dim).
         """
+        # Save the last timestep of the input state to access extra features.
+        # The extra features appended by the environment are: 
+        # [norm_adjusted_buy, norm_adjusted_sell, inventory, cash_ratio, norm_entry_diff]
+        # Here we assume the "inventory" is at index (state_dim - 3).
+        last_state = x[:, -1, :]  # shape: (batch, state_dim)
+
         # Permute input to shape (batch, state_dim, seq_length) for CNN.
         x = x.permute(0, 2, 1)
         # Apply CNN and a ReLU activation.
@@ -105,6 +112,19 @@ class HybridQNetwork(nn.Module):
         last_out = gru_out[:, -1, :]  # (batch, gru_hidden_size)
         # Optionally apply ReLU and map to Q-values.
         q_values = self.fc(torch.relu(last_out))
+        
+        # --- Inhibit Sell Action when no entry exists ---
+        # In a long position, if there is no open trade, then inventory will be 0.
+        # We use that fact to mask the Q-value for the "sell" action (index 2).
+        # We extract the inventory from the last state's extra features.
+        inventory_index = self.state_dim - 3  # Third extra feature
+        inventory = last_state[:, inventory_index]  # shape: (batch,)
+        # Create a mask: 1 if inventory is nonzero (entry exists), 0 otherwise.
+        mask = (inventory != 0).float()
+        # If no entry exists, force the sell Q-value to be very low (here, subtracting a large number).
+        q_values[:, 2] = q_values[:, 2] * mask - (1 - mask) * 1e9
+        # ----------------------------------------------------
+
         return q_values, None
 
 # ---------------------------
