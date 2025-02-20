@@ -125,132 +125,108 @@ class TradingEnvironment:
         return np.concatenate([np.array(norm_features), np.array(extra_features)])
 
     def step(self, action):
-        """
-        Execute an action (buy, sell, or hold) and advance one timestep.
-
-        Parameters:
-            action (int): 0 (hold), 1 (buy), or 2 (sell).
-
-        Returns:
-            tuple: (next_state, reward, done, info)
-                - next_state: The state after the action.
-                - reward: The reward obtained.
-                - done (bool): Whether the simulation has finished.
-                - info (dict): Additional info such as the current step.
-        """
-        # Get the current price and compute the portfolio value before the action
         current_price = self.data_values[self.current_step][self.close_index]
         portfolio_before = self.cash + self.inventory * current_price
         current_timestamp = self.timestamps_list[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
-        penalty = 0.0  # Initialize a penalty variable
-        trade_fraction = 0.1  # Fraction of cash to use per trade
+        penalty = 0.0
+        trade_fraction = 0.1
 
         if action == 1:  # Buy action
             if self.inventory < 0:
-                # Cannot buy if in a short position; apply penalty
                 penalty = 0.02 * portfolio_before
             else:
                 buy_usd = trade_fraction * self.cash
                 if buy_usd < 100:
-                    penalty = 0.01 * portfolio_before  # Not enough cash; small penalty
+                    penalty = 0.01 * portfolio_before
                 else:
-                    # Total cost includes transaction fee (e.g., 0.05% of buy_usd)
                     transaction_fee = buy_usd * self.transaction_cost
-                    total_cost = buy_usd + transaction_fee  # What we actually spend
+                    total_cost = buy_usd + transaction_fee
                     if total_cost > self.cash:
-                        penalty = 0.01 * portfolio_before  # Insufficient funds after fees
+                        penalty = 0.01 * portfolio_before
                     else:
-                        # Quantity bought is based on the base amount before fees
                         qty = buy_usd / current_price
                         if self.inventory > 0:
-                            # Update the weighted average entry price
                             old_value = self.inventory * self.entry_price
                             new_value = qty * current_price
                             total_qty = self.inventory + qty
                             self.entry_price = (old_value + new_value) / total_qty
                             self.inventory = total_qty
-                            # Update unrealized gain/loss
-                            cost_basis = total_qty * self.entry_price
                             current_value = total_qty * current_price
-                            self.gain_loss = current_value - cost_basis - (transaction_fee + self.gain_loss * total_qty / self.inventory)
+                            cost_basis = total_qty * self.entry_price
+                            self.gain_loss = current_value - cost_basis - transaction_fee
                         else:
                             self.entry_price = current_price
                             self.inventory = qty
-                            # Initial gain/loss is negative due to transaction fee
-                            cost_basis = qty * self.entry_price
                             self.gain_loss = -transaction_fee
-                        self.cash -= total_cost  # Deduct total cost including fees
+                        self.cash -= total_cost
                         # logger.debug(f"Step {self.current_step}: Action=Buy, Spent={total_cost:.2f}, "
                         #             f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, New Cash={self.cash:.2f}, Gain/Loss={self.gain_loss:.2f}")
 
-        elif action == 2:  # Sell action (to close a long position)
+        elif action == 2:  # Sell action
             if self.inventory <= 0:
                 penalty = 0.02 * portfolio_before
             else:
-                # Proceeds before fees
                 proceeds = self.inventory * current_price
-                # Transaction fee is applied to proceeds
                 transaction_fee = proceeds * self.transaction_cost
-                proceeds_after_fee = proceeds - transaction_fee  # What we actually receive
-                # Calculate realized gain/loss including fees
+                proceeds_after_fee = proceeds - transaction_fee
                 cost_basis = self.inventory * self.entry_price
                 realized_gain_loss = proceeds_after_fee - cost_basis
                 self.cash += proceeds_after_fee
                 self.inventory = 0.0
                 self.entry_price = 0.0
-                self.gain_loss = 0.0  # Reset gain/loss after closing position
+                self.gain_loss = 0.0
                 logger.debug(f"Step {self.current_step}: Action=Sell, Proceeds={proceeds:.2f}, "
                             f"Fee={transaction_fee:.2f}, Net Proceeds={proceeds_after_fee:.2f}, "
                             f"Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
 
-        # Advance to the next timestep
         next_step = self.current_step + 1
         done = next_step >= self.n_steps or next_step >= self.max_steps
         if not done:
             try:
                 new_price = self.data_values[next_step][self.close_index]
             except IndexError:
-                logger.error(f"Attempted to access step {next_step}, which is out of bounds.")
+                logger.error(f"Step {next_step} out of bounds.")
                 new_price = current_price
                 done = True
         else:
             new_price = current_price
 
-        # Update unrealized gain/loss if position remains open
         if self.inventory > 0 and action != 2:
             current_value = self.inventory * new_price
             cost_basis = self.inventory * self.entry_price
-            total_fees = (buy_usd * self.transaction_cost) if action == 1 else 0  # Only fees from latest buy
+            total_fees = (trade_fraction * self.cash * self.transaction_cost) if action == 1 else 0
             self.gain_loss = current_value - cost_basis - total_fees
 
         portfolio_after = self.cash + self.inventory * new_price
-        # Reward is the change in portfolio value minus any penalty
-        raw_reward = (portfolio_after - portfolio_before) - penalty
+        
+        # Reward calculation: Use gain_loss directly, adjusted for penalties
+        if action == 2 and self.inventory == 0:  # Sell completed
+            raw_reward = realized_gain_loss - penalty
+        elif action == 1 and self.inventory > 0:  # Buy executed
+            raw_reward = self.gain_loss - penalty  # Initial fee or updated unrealized
+        else:  # Hold or invalid action
+            raw_reward = self.gain_loss - penalty if self.inventory > 0 else -penalty
+        
         normalized_reward = raw_reward / self.initial_capital
+        reward = np.clip(normalized_reward, -1, 1)
+        
+        # Adjust reward for terminal state
+        if done:
+            if portfolio_after > self.initial_capital:
+                reward = min(reward + 0.5, 1)  # Smaller bonus for profit
+            elif portfolio_after < 0.75 * self.initial_capital:
+                reward = max(reward - 0.5, -1)  # Larger penalty for loss
 
-        # Get the next state
         if not done:
             try:
                 next_state = self._get_state(next_step)
             except IndexError:
-                logger.error(f"Failed to get next state for step {next_step}. Setting state to zeros.")
                 next_state = np.zeros(self.state_dim)
         else:
             next_state = np.zeros(self.state_dim)
 
         self.current_step = next_step
         if self.current_step % 1000 == 0:
-            logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")
-
-        # If portfolio value falls below 75% of initial capital, end the simulation
-        if portfolio_after < 0.75 * self.initial_capital:
-            logger.warning(f"Portfolio value below 75% initial: {portfolio_after:.2f}")
-            done = True
-            raw_reward -= 0.05 * portfolio_before
-            normalized_reward = raw_reward / self.initial_capital
-
-        reward = np.clip(normalized_reward, -1, 1)
-        if done and portfolio_after > self.initial_capital:
-            reward = min(reward * 10, 1)
+            logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Reward: {reward:.6f} - Done: {done}")
 
         return next_state, reward, done, {"n_step": next_step}

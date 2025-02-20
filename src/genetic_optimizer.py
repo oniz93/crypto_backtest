@@ -417,53 +417,44 @@ class GeneticOptimizer:
         """
         from src.rl_agent import DQNAgent
         seq_length = self.config.get('seq_length', 1440)
-
         agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3, seq_length=seq_length)
-        total_rewards = []
         chunk_size = self.config.get('chunk_size', 4000)
         full_data = env.data.copy()
         all_indices = full_data.index
-        initial_inventory = 0.0
-        initial_entry_price = 0.0
-        initial_cash = env.initial_capital
+        total_rewards = []
 
         for ep in range(episodes):
             num_chunks = int(np.ceil(len(all_indices) / chunk_size))
             chunk_indices = [all_indices[i * chunk_size:(i + 1) * chunk_size] for i in range(num_chunks)]
             random.shuffle(chunk_indices)
             ep_reward = 0.0
-            env.inventory = initial_inventory
-            env.entry_price = initial_entry_price
-            env.cash = initial_cash
-            info = None
 
             for i, indices in enumerate(chunk_indices):
-                logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{len(chunk_indices)} (size {len(indices)} rows)...")
+                logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{num_chunks} (size {len(indices)} rows)...")
                 env.data = full_data.loc[indices]
                 env.data_values = env.data.values
                 env.n_steps = len(env.data)
                 env.timestamps_list = list(env.data.index)
-                state = env.reset()  # Reset only data, not inventory/cash
-                env.inventory = initial_inventory
-                env.entry_price = initial_entry_price
-                env.cash = initial_cash
+                state = env.reset()  # Full reset: cash, inventory, gain_loss
+                chunk_reward = 0.0
                 done = False
+
                 while not done:
                     action = agent.select_action(state)
                     next_state, reward, done, info = env.step(action)
                     agent.store_transition(state, action, reward, next_state, done)
                     agent.update_policy_from_batch([(state, action, reward, next_state, done)])
                     state = next_state
-                    ep_reward += reward
-                initial_inventory = env.inventory
-                initial_entry_price = env.entry_price
-                initial_cash = env.cash
-                ep_reward += info.get('n_step', 0)
-                logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {ep_reward} (last step: {info.get('n_step', 0)})")
+                    chunk_reward += reward
+
+                ep_reward += chunk_reward
+                logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.6f} (last step: {info.get('n_step', 0)})")
+            
             total_rewards.append(ep_reward)
-            logger.info(f"Episode {ep + 1} completed. Total episode reward: {ep_reward}")
+            logger.info(f"Episode {ep + 1} completed. Total episode reward: {ep_reward:.6f}")
+
         avg_reward = np.mean(total_rewards)
-        logger.info(f"RL training over {episodes} episodes completed. Average reward: {avg_reward}")
+        logger.info(f"RL training over {episodes} episodes completed. Average reward: {avg_reward:.6f}")
         return agent, avg_reward
 
     def evaluate_individuals(self, individuals):
