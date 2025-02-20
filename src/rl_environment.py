@@ -139,31 +139,36 @@ class TradingEnvironment:
                 - done (bool): Whether the simulation has finished.
                 - info (dict): Additional info such as the current step.
         """
-        # Get the current price and compute the portfolio value before the action.
+        # Get the current price and compute the portfolio value before the action
         current_price = self.data_values[self.current_step][self.close_index]
         portfolio_before = self.cash + self.inventory * current_price
         current_timestamp = self.timestamps_list[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
         penalty = 0.0  # Initialize a penalty variable
         trade_fraction = 0.1  # Fraction of cash to use per trade
 
+        # Log invalid actions
         if (self.inventory == 0 and action == 2) or (self.inventory != 0 and action == 1):
-            logger.info(f"Step {self.current_step}: Action={action}, Inventory={self.inventory}, Cash={self.cash}")
+            logger.debug(f"Step {self.current_step}: Action={action}, Inventory={self.inventory}, Cash={self.cash}")
 
-        # Process actions based on the mode (long or short)
-        if self.mode == "long":
-            if action == 1:  # Buy action
-                if self.inventory < 0:
-                    # Cannot buy if in a short position; apply penalty.
-                    penalty = 0.02 * portfolio_before
+        if action == 1:  # Buy action
+            if self.inventory < 0:
+                # Cannot buy if in a short position; apply penalty
+                penalty = 0.02 * portfolio_before
+            else:
+                buy_usd = trade_fraction * self.cash
+                if buy_usd < 100:
+                    penalty = 0.01 * portfolio_before  # Not enough cash; small penalty
                 else:
-                    buy_usd = trade_fraction * self.cash
-                    if buy_usd < 100:
-                        penalty = 0.01 * portfolio_before  # Not enough cash; small penalty.
+                    # Total cost includes transaction fee (e.g., 0.05% of buy_usd)
+                    transaction_fee = buy_usd * self.transaction_cost
+                    total_cost = buy_usd + transaction_fee  # What we actually spend
+                    if total_cost > self.cash:
+                        penalty = 0.01 * portfolio_before  # Insufficient funds after fees
                     else:
-                        # Calculate the number of units to buy.
-                        qty = (buy_usd / current_price) * (1 - self.transaction_cost)
+                        # Quantity bought is based on the base amount before fees
+                        qty = buy_usd / current_price
                         if self.inventory > 0:
-                            # Update the weighted average entry price.
+                            # Update the weighted average entry price
                             old_value = self.inventory * self.entry_price
                             new_value = qty * current_price
                             total_qty = self.inventory + qty
@@ -171,51 +176,31 @@ class TradingEnvironment:
                             self.inventory = total_qty
                         else:
                             self.entry_price = current_price
-                            self.inventory += qty
-                        self.cash -= buy_usd  # Deduct cash used for purchase
-            elif action == 2:  # Sell action (to close a long position)
-                if self.inventory <= 0:
-                    penalty = 0.02 * portfolio_before
-                else:
-                    proceeds = self.inventory * current_price
-                    proceeds_after_cost = proceeds * (1 - self.transaction_cost)
-                    self.cash += proceeds_after_cost
-                    self.inventory = 0.0
-                    self.entry_price = 0.0
-        elif self.mode == "short":
-            if action == 1:  # Open or add to short position
-                if self.inventory > 0:
-                    penalty = 0.02 * portfolio_before
-                else:
-                    sell_usd = trade_fraction * self.cash
-                    if sell_usd < 100:
-                        penalty = 0.01 * portfolio_before
-                    else:
-                        qty = (sell_usd / current_price) * (1 - self.transaction_cost)
-                        if self.inventory < 0:
-                            old_value = abs(self.inventory) * self.entry_price
-                            new_value = qty * current_price
-                            total_qty = abs(self.inventory) + qty
-                            self.entry_price = (old_value + new_value) / total_qty
-                            self.inventory -= qty
-                        else:
-                            self.entry_price = current_price
-                            self.inventory -= qty
-                        self.cash -= sell_usd
-            elif action == 2:  # Buy to cover a short position
-                if self.inventory >= 0:
-                    penalty = 0.02 * portfolio_before
-                else:
-                    cost_to_cover = abs(self.inventory) * current_price
-                    cost_after_cost = cost_to_cover * (1 + self.transaction_cost)
-                    if cost_after_cost > self.cash:
-                        penalty = 0.02 * portfolio_before
-                    else:
-                        self.cash -= cost_after_cost
-                        self.inventory = 0.0
-                        self.entry_price = 0.0
+                            self.inventory = qty
+                        self.cash -= total_cost  # Deduct total cost including fees
+                        # logger.debug(f"Step {self.current_step}: Action=Buy, Spent={total_cost:.2f}, "
+                        #             f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, New Cash={self.cash:.2f}")
 
-        # Advance to the next timestep.
+        elif action == 2:  # Sell action (to close a long position)
+            if self.inventory <= 0:
+                penalty = 0.02 * portfolio_before
+            else:
+                # Proceeds before fees
+                proceeds = self.inventory * current_price
+                # Transaction fee is 0.05% of the proceeds
+                transaction_fee = proceeds * self.transaction_cost
+                proceeds_after_fee = proceeds - transaction_fee  # What we actually receive
+                # Calculate realized gain/loss including fees
+                cost_basis = self.inventory * self.entry_price  # Original cost of inventory
+                realized_gain_loss = proceeds_after_fee - cost_basis
+                self.cash += proceeds_after_fee
+                self.inventory = 0.0
+                self.entry_price = 0.0
+                logger.debug(f"Step {self.current_step}: Action=Sell, Proceeds={proceeds:.2f}, "
+                            f"Fee={transaction_fee:.2f}, Net Proceeds={proceeds_after_fee:.2f}, "
+                            f"Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
+
+        # Advance to the next timestep
         next_step = self.current_step + 1
         done = next_step >= self.n_steps or next_step >= self.max_steps
         if not done:
@@ -229,12 +214,11 @@ class TradingEnvironment:
             new_price = current_price
 
         portfolio_after = self.cash + self.inventory * new_price
-        # Reward is the change in portfolio value minus any penalty.
+        # Reward is the change in portfolio value minus any penalty
         raw_reward = (portfolio_after - portfolio_before) - penalty
-
         normalized_reward = raw_reward / self.initial_capital
 
-        # Get the next state.
+        # Get the next state
         if not done:
             try:
                 next_state = self._get_state(next_step)
@@ -246,17 +230,16 @@ class TradingEnvironment:
 
         self.current_step = next_step
         if self.current_step % 1000 == 0:
-            logger.debug(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after} - Done: {done}")
+            logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")
 
-        # If portfolio value falls below 75% of initial capital, end the simulation.
+        # If portfolio value falls below 75% of initial capital, end the simulation
         if portfolio_after < 0.75 * self.initial_capital:
-            logger.warning(f"Portfolio value below 75% initial: {portfolio_after}")
+            logger.warning(f"Portfolio value below 75% initial: {portfolio_after:.2f}")
             done = True
             raw_reward -= 0.05 * portfolio_before
             normalized_reward = raw_reward / self.initial_capital
 
         reward = np.clip(normalized_reward, -1, 1)
-
         if done and portfolio_after > self.initial_capital:
             reward = min(reward * 10, 1)
 
