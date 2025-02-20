@@ -1,4 +1,4 @@
-start_simulation: 2023-01-01
+start_simulation: 2023-06-01
 end_simulation: 2023-08-31
 start_cutoff: 2022-01-01
 end_cutoff: 2023-08-31
@@ -9,7 +9,7 @@ treshold_price: 0.00001
 processing: local
 seq_length: 60
 timing: false
-chunk_size: 15000
+chunk_size: 4000
 episodes: 20
 chunk_epochs: 10
 num_processes: 10

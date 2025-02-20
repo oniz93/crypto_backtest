@@ -146,6 +146,9 @@ class TradingEnvironment:
         penalty = 0.0  # Initialize a penalty variable
         trade_fraction = 0.1  # Fraction of cash to use per trade
 
+        if (self.inventory == 0 and action == 2) or (self.inventory != 0 and action == 1):
+            logger.info(f"Step {self.current_step}: Action={action}, Inventory={self.inventory}, Cash={self.cash}")
+
         # Process actions based on the mode (long or short)
         if self.mode == "long":
             if action == 1:  # Buy action
@@ -227,7 +230,9 @@ class TradingEnvironment:
 
         portfolio_after = self.cash + self.inventory * new_price
         # Reward is the change in portfolio value minus any penalty.
-        reward = (portfolio_after - portfolio_before) - penalty
+        raw_reward = (portfolio_after - portfolio_before) - penalty
+
+        normalized_reward = raw_reward / self.initial_capital
 
         # Get the next state.
         if not done:
@@ -247,9 +252,12 @@ class TradingEnvironment:
         if portfolio_after < 0.75 * self.initial_capital:
             logger.warning(f"Portfolio value below 75% initial: {portfolio_after}")
             done = True
-            reward -= 0.05 * portfolio_before
+            raw_reward -= 0.05 * portfolio_before
+            normalized_reward = raw_reward / self.initial_capital
+
+        reward = np.clip(normalized_reward, -1, 1)
 
         if done and portfolio_after > self.initial_capital:
-            reward = abs(reward) * 2
+            reward = min(reward * 10, 1)
 
         return next_state, reward, done, {"n_step": next_step}

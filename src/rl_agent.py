@@ -113,21 +113,33 @@ class HybridQNetwork(nn.Module):
         # Optionally apply ReLU and map to Q-values.
         q_values = self.fc(torch.relu(last_out))
         
-        # --- Inhibit Actions Based on Open Position ---
-        # Using the "inventory" value (at index state_dim - 3), we implement:
-        #   • Sell (action index 2) is disabled when there is no open position (inventory == 0).
-        #   • Buy (action index 1) is disabled when a position is already open (inventory != 0).
-        inventory_index = self.state_dim - 3  # Index for the inventory feature.
-        inventory = last_state[:, inventory_index]  # shape: (batch,)
+        # --- Action Inhibition and Discouragement ---
+        # Use the entry_price at index state_dim - 1 to determine position status
+        entry_price_index = self.state_dim - 1
+        entry_price = last_state[:, entry_price_index]  # shape: (batch,)
 
-        # For sell: allow only if inventory is nonzero.
-        mask_sell = (inventory != 0).float()
-        q_values[:, 2] = q_values[:, 2] * mask_sell - (1 - mask_sell) * 1e9
+        # Define a threshold to consider entry_price as "zero" (accounting for float precision)
+        EPSILON = 1e-6
+        has_position = (torch.abs(entry_price) > EPSILON).float()  # 1.0 if position open, 0.0 if not
 
-        # For buy: allow only if inventory is zero.
-        mask_buy = (inventory == 0).float()
-        q_values[:, 1] = q_values[:, 1] * mask_buy - (1 - mask_buy) * 1e9
-        # ----------------------------------------------------
+        # Disable invalid actions with a large negative penalty
+        LARGE_PENALTY = -1e6  # Sufficiently large to ensure selection avoidance
+        
+        # Buy (action 1): Disable if a position is already open (has_position == 1)
+        mask_buy = (1.0 - has_position)  # 1.0 if no position, 0.0 if position exists
+        q_values[:, 1] = q_values[:, 1] * mask_buy + (1.0 - mask_buy) * LARGE_PENALTY
+
+        # Sell (action 2): 
+        # - Disable if no position (has_position == 0)
+        # - Slightly discourage (not disable) if position exists and entry_price < 0
+        mask_sell = has_position  # 1.0 if position exists, 0.0 if not
+        discourage_sell = (entry_price < 0.0).float() * has_position  # 1.0 if position exists and entry_price < 0
+        DISCOURAGE_PENALTY = -0.1  # Small penalty to discourage selling at a loss
+        q_values[:, 2] = (
+            q_values[:, 2] * mask_sell +  # Base Q-value if sell is valid
+            (1.0 - mask_sell) * LARGE_PENALTY +  # Disable sell if no position
+            discourage_sell * DISCOURAGE_PENALTY  # Slight penalty if selling at a loss
+        )
 
         return q_values, None
 
@@ -135,8 +147,8 @@ class HybridQNetwork(nn.Module):
 # DQN Agent Using the HybridQNetwork
 # ---------------------------
 class DQNAgent:
-    def __init__(self, state_dim, action_dim, lr=1e-2, gamma=0.90,
-                 epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01,
+    def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99,
+                 epsilon=1.0, epsilon_decay=0.99, epsilon_min=0.01,
                  seq_length=1440, buffer_capacity=10000,
                  per_alpha=0.6, per_beta=0.4, per_beta_increment=0.001):
         """
@@ -227,21 +239,48 @@ class DQNAgent:
 
     def select_action(self, state):
         """
-        Select an action using an epsilon-greedy strategy.
+        Select an action using an epsilon-greedy strategy, ensuring random actions respect position constraints.
 
         Parameters:
             state (np.array): Input state (either 1D or 2D).
 
         Returns:
-            int: Chosen action index.
+            int: Chosen action index (0=hold, 1=buy, 2=sell).
         """
         state = self._ensure_history(state)  # Ensure state has shape (seq_length, state_dim)
-        state = torch.FloatTensor(state).to(self.device).unsqueeze(0)  # Add batch dimension: (1, seq_length, state_dim)
+        state_tensor = torch.FloatTensor(state).to(self.device).unsqueeze(0)  # Shape: (1, seq_length, state_dim)
+
+        # Extract entry_price from the last timestep of the state (index state_dim - 1)
+        entry_price_index = self.state_dim - 1
+        entry_price = state[-1, entry_price_index]  # Last timestep, entry_price feature
+
+        # Define a small threshold for considering entry_price as zero (handles float precision)
+        EPSILON = 1e-6
+        has_position = abs(entry_price) > EPSILON  # True if a position is open
+
+        # Define valid actions based on position status
+        valid_actions = [0]  # Hold is always valid
+        if not has_position:
+            valid_actions.append(1)  # Buy is valid if no position
+        if has_position:
+            valid_actions.append(2)  # Sell is valid if position exists
+
         if np.random.rand() < self.epsilon:
-            return np.random.randint(self.action_dim)
-        with torch.no_grad():
-            q_values, _ = self.q_net(state)
-        return q_values.argmax().item()
+            # Exploration: randomly select from valid actions
+            action = np.random.choice(valid_actions)
+        else:
+            # Exploitation: use Q-network to select the best action
+            with torch.no_grad():
+                q_values, _ = self.q_net(state_tensor)
+                # Mask invalid actions (though forward already does this, we reinforce it here)
+                q_values = q_values.cpu().numpy()[0]  # Shape: (action_dim,)
+                if has_position:
+                    q_values[1] = float('-inf')  # Mask buy if position exists
+                else:
+                    q_values[2] = float('-inf')  # Mask sell if no position
+                action = np.argmax(q_values)
+
+        return action
 
     def store_transition(self, state, action, reward, next_state, done):
         """
@@ -279,7 +318,7 @@ class DQNAgent:
 
         self.optimizer.zero_grad()
         if self.scaler is not None:
-            with torch.amp.autocast(device_type=self.device):
+            with torch.amp.autocast(device_type=self.device.type):
                 q_values, _ = self.q_net(states)
                 q_values = q_values.gather(1, actions)
                 with torch.no_grad():
