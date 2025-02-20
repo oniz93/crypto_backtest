@@ -52,7 +52,9 @@ class TradingEnvironment:
         self.state_dim = self.data.shape[1] + 5
         self.action_dim = 3  # Actions: 0 = hold, 1 = buy, 2 = sell
 
-        self.entry_price = 0.0
+        # Initialize state variables
+        self.entry_price = 0.0  # Still needed for position tracking in step
+        self.gain_loss = 0.0    # New attribute to track gain/loss
         self.reset()
 
     def reset(self):
@@ -63,6 +65,7 @@ class TradingEnvironment:
             np.array: The initial state vector.
         """
         self.entry_price = 0.0
+        self.gain_loss = 0.0    # Reset gain/loss to 0
         self.current_step = 0
         self.cash = self.initial_capital
         self.inventory = 0
@@ -77,7 +80,7 @@ class TradingEnvironment:
         The state vector includes:
           - Normalized market features (e.g., price, volume).
           - Extra features: normalized adjusted buy price, normalized adjusted sell price,
-            current inventory, cash ratio, and the normalized difference between current price and entry price.
+            current inventory, cash ratio, and normalized gain/loss.
 
         Parameters:
             step (int): Timestep index for which to generate the state.
@@ -113,15 +116,11 @@ class TradingEnvironment:
         adjusted_sell_price = close_price / (1 + self.transaction_cost)
         norm_adjusted_buy = normalize_price(adjusted_buy_price)
         norm_adjusted_sell = normalize_price(adjusted_sell_price)
-        # Calculate the difference from the entry price.
-        if self.entry_price == 0.0:
-            norm_entry_diff = 0.0
-        else:
-            entry_diff = self.entry_price - close_price
-            norm_entry_diff = normalize_diff(entry_diff)
+        # Normalize the gain/loss value (default to 0 if no position).
+        norm_gain_loss = normalize_diff(self.gain_loss, 10000)
         # Extra features include these calculated values.
         extra_features = [norm_adjusted_buy, norm_adjusted_sell, self.inventory,
-                          self.cash / self.initial_capital, norm_entry_diff]
+                          self.cash / self.initial_capital, norm_gain_loss]
         # Return the concatenated state vector.
         return np.concatenate([np.array(norm_features), np.array(extra_features)])
 
@@ -145,10 +144,6 @@ class TradingEnvironment:
         current_timestamp = self.timestamps_list[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
         penalty = 0.0  # Initialize a penalty variable
         trade_fraction = 0.1  # Fraction of cash to use per trade
-
-        # Log invalid actions
-        if (self.inventory == 0 and action == 2) or (self.inventory != 0 and action == 1):
-            logger.debug(f"Step {self.current_step}: Action={action}, Inventory={self.inventory}, Cash={self.cash}")
 
         if action == 1:  # Buy action
             if self.inventory < 0:
@@ -174,12 +169,19 @@ class TradingEnvironment:
                             total_qty = self.inventory + qty
                             self.entry_price = (old_value + new_value) / total_qty
                             self.inventory = total_qty
+                            # Update unrealized gain/loss
+                            cost_basis = total_qty * self.entry_price
+                            current_value = total_qty * current_price
+                            self.gain_loss = current_value - cost_basis - (transaction_fee + self.gain_loss * total_qty / self.inventory)
                         else:
                             self.entry_price = current_price
                             self.inventory = qty
+                            # Initial gain/loss is negative due to transaction fee
+                            cost_basis = qty * self.entry_price
+                            self.gain_loss = -transaction_fee
                         self.cash -= total_cost  # Deduct total cost including fees
                         # logger.debug(f"Step {self.current_step}: Action=Buy, Spent={total_cost:.2f}, "
-                        #             f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, New Cash={self.cash:.2f}")
+                        #             f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, New Cash={self.cash:.2f}, Gain/Loss={self.gain_loss:.2f}")
 
         elif action == 2:  # Sell action (to close a long position)
             if self.inventory <= 0:
@@ -187,15 +189,16 @@ class TradingEnvironment:
             else:
                 # Proceeds before fees
                 proceeds = self.inventory * current_price
-                # Transaction fee is 0.05% of the proceeds
+                # Transaction fee is applied to proceeds
                 transaction_fee = proceeds * self.transaction_cost
                 proceeds_after_fee = proceeds - transaction_fee  # What we actually receive
                 # Calculate realized gain/loss including fees
-                cost_basis = self.inventory * self.entry_price  # Original cost of inventory
+                cost_basis = self.inventory * self.entry_price
                 realized_gain_loss = proceeds_after_fee - cost_basis
                 self.cash += proceeds_after_fee
                 self.inventory = 0.0
                 self.entry_price = 0.0
+                self.gain_loss = 0.0  # Reset gain/loss after closing position
                 logger.debug(f"Step {self.current_step}: Action=Sell, Proceeds={proceeds:.2f}, "
                             f"Fee={transaction_fee:.2f}, Net Proceeds={proceeds_after_fee:.2f}, "
                             f"Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
@@ -212,6 +215,13 @@ class TradingEnvironment:
                 done = True
         else:
             new_price = current_price
+
+        # Update unrealized gain/loss if position remains open
+        if self.inventory > 0 and action != 2:
+            current_value = self.inventory * new_price
+            cost_basis = self.inventory * self.entry_price
+            total_fees = (buy_usd * self.transaction_cost) if action == 1 else 0  # Only fees from latest buy
+            self.gain_loss = current_value - cost_basis - total_fees
 
         portfolio_after = self.cash + self.inventory * new_price
         # Reward is the change in portfolio value minus any penalty
