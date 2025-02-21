@@ -27,35 +27,34 @@ class TradingEnvironment:
             transaction_cost (float): Fractional transaction fee.
             max_steps (int): Maximum number of timesteps to simulate.
         """
-        self.price_data = price_data
-        self.indicators = indicators
+        from src.utils import normalize_price_vec, normalize_volume_vec, normalize_diff_vec
         self.initial_capital = initial_capital
         self.transaction_cost = transaction_cost
         self.max_steps = max_steps
         self.mode = mode
-
-        # Merge price data and indicator data on their timestamps.
-        self.data = price_data.join(indicators, how='inner').dropna()
-        self.data = self.data.sort_index()
-
-        # Convert the DataFrame to a NumPy array for faster indexing.
+        self.data = price_data.join(indicators, how='inner').dropna().sort_index()
         self.data_values = self.data.values
         self.columns = self.data.columns
-        # Find the column index for the closing price.
-        self.close_index = self.data.columns.get_loc('close')
+        self.close_index = self.columns.get_loc('close')
         self.n_steps = len(self.data_values)
-        # Store the timestamps as a list.
         self.timestamps_list = self.data.index.tolist()
 
-        # Define the dimension of the state vector:
-        # all columns from data plus 5 extra features.
-        self.state_dim = self.data.shape[1] + 5
-        self.action_dim = 3  # Actions: 0 = hold, 1 = buy, 2 = sell
+        # Precompute normalized features using vectorized functions
+        self.norm_features = np.zeros_like(self.data_values, dtype=np.float32)
+        for i, col in enumerate(self.columns):
+            if col in ['open', 'high', 'low', 'close']:
+                self.norm_features[:, i] = normalize_price_vec(self.data_values[:, i])
+            elif col == 'volume':
+                self.norm_features[:, i] = normalize_volume_vec(self.data_values[:, i])
+            elif col.startswith('VWAP') or col.startswith('VWMA'):
+                self.norm_features[:, i] = normalize_diff_vec(self.data_values[:, i])
+            elif col.startswith('cluster_'):
+                self.norm_features[:, i] = normalize_volume_vec(self.data_values[:, i])
+            else:
+                self.norm_features[:, i] = self.data_values[:, i]
 
-        # Initialize state variables
-        self.entry_price = 0.0  # Still needed for position tracking in step
-        self.gain_loss = 0.0
-        self.total_fees = 0.0# New attribute to track gain/loss
+        self.state_dim = self.data.shape[1] + 5
+        self.action_dim = 3
         self.reset()
 
     def reset(self):
@@ -89,41 +88,16 @@ class TradingEnvironment:
         Returns:
             np.array: The state vector.
         """
-        from src.utils import normalize_price, normalize_volume, normalize_diff
-        if step is None:
-            step = self.current_step
-        if step < 0 or step >= self.n_steps:
-            logger.error(f"Attempted to access step {step}, which is out of bounds.")
-            raise IndexError("Step is out of bounds in _get_state.")
-        # Get the row corresponding to the current timestep.
-        row = self.data_values[step]
-        norm_features = []
-        # Normalize each feature based on its type.
-        for col, val in zip(self.data.columns, row):
-            if col in ['open', 'high', 'low', 'close']:
-                norm_features.append(normalize_price(val))
-            elif col == 'volume':
-                norm_features.append(normalize_volume(val))
-            elif col.startswith('VWAP') or col.startswith('VWMA'):
-                norm_features.append(normalize_diff(val))
-            elif col.startswith('cluster_'):
-                norm_features.append(normalize_volume(val))
-            else:
-                norm_features.append(val)
-        # Get the raw close price for extra calculations.
-        close_price = row[self.close_index]
-        # Calculate adjusted buy and sell prices (including transaction cost).
-        adjusted_buy_price = close_price * (1 + self.transaction_cost)
-        adjusted_sell_price = close_price / (1 + self.transaction_cost)
-        norm_adjusted_buy = normalize_price(adjusted_buy_price)
-        norm_adjusted_sell = normalize_price(adjusted_sell_price)
-        # Normalize the gain/loss value (default to 0 if no position).
-        norm_gain_loss = normalize_diff(self.gain_loss, 10000)
-        # Extra features include these calculated values.
-        extra_features = [norm_adjusted_buy, norm_adjusted_sell, self.inventory,
-                          self.cash / self.initial_capital, norm_gain_loss]
-        # Return the concatenated state vector.
-        return np.concatenate([np.array(norm_features), np.array(extra_features)])
+        from src.utils import normalize_price_vec, normalize_diff_vec
+        step = self.current_step if step is None else step
+        row = self.norm_features[step]
+        close_price = self.data_values[step, self.close_index]
+        norm_adjusted_buy = normalize_price_vec(np.array([close_price * (1 + self.transaction_cost)]))[0]
+        norm_adjusted_sell = normalize_price_vec(np.array([close_price / (1 + self.transaction_cost)]))[0]
+        norm_gain_loss = normalize_diff_vec(np.array([self.gain_loss], dtype=np.float32), max_diff=10000)[0]
+        extra_features = np.array([norm_adjusted_buy, norm_adjusted_sell, self.inventory,
+                                   self.cash / self.initial_capital, norm_gain_loss], dtype=np.float32)
+        return np.concatenate([row, extra_features])
 
     def step(self, action):
         current_price = self.data_values[self.current_step][self.close_index]

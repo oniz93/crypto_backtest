@@ -15,14 +15,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from collections import deque
 
 # ---------------------------
 # Hybrid Q-Network: CNN -> TCN -> GRU -> Fully Connected Layer
 # ---------------------------
 class HybridQNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim,
-                 cnn_channels=64, tcn_channels=64, gru_hidden_size=64,
-                 num_tcn_layers=2, num_gru_layers=1):
+    def __init__(self, state_dim, action_dim, cnn_channels=32,
+                 tcn_channels=32, gru_hidden_size=32,
+                 num_tcn_layers=1, num_gru_layers=1, seq_length=1440):
         """
         Hybrid Q-Network that implements a processing pipeline:
         CNN -> TCN -> GRU -> Fully Connected Layer.
@@ -37,48 +38,13 @@ class HybridQNetwork(nn.Module):
             num_gru_layers (int): Number of GRU layers.
         """
         super(HybridQNetwork, self).__init__()
-        self.state_dim = state_dim  # Save input dimension for later access to extra features.
-        # The input state is expected in shape: (batch, seq_length, state_dim).
-        # We first permute it to (batch, state_dim, seq_length) so that we can apply 1D convolutions along the time axis.
-
-        # ---------------------------
-        # CNN Block: Reduce feature dimensionality
-        # ---------------------------
-        self.cnn = nn.Conv1d(in_channels=state_dim,
-                             out_channels=cnn_channels,
-                             kernel_size=3,
-                             padding=1)  # padding=1 preserves sequence length
-
-        # ---------------------------
-        # TCN Block: Multiple dilated convolutions to capture temporal patterns
-        # ---------------------------
-        tcn_layers = []
-        in_channels = cnn_channels
-        # Create a series of convolutional layers with increasing dilation.
-        for i in range(num_tcn_layers):
-            dilation = 2 ** i  # Exponential dilation to enlarge the receptive field
-            tcn_layers.append(
-                nn.Conv1d(in_channels, tcn_channels,
-                          kernel_size=3,
-                          padding=dilation,
-                          dilation=dilation)
-            )
-            tcn_layers.append(nn.ReLU())
-            in_channels = tcn_channels
+        self.state_dim = state_dim
+        self.seq_length = seq_length
+        self.cnn = nn.Conv1d(state_dim, cnn_channels, kernel_size=3, padding=1)
+        tcn_layers = [nn.Conv1d(cnn_channels, tcn_channels, kernel_size=3, padding=2, dilation=2),
+                      nn.ReLU()]
         self.tcn = nn.Sequential(*tcn_layers)
-
-        # ---------------------------
-        # GRU Block: Process the sequential output from TCN
-        # ---------------------------
-        # We first need to permute the TCN output back to (batch, seq_length, channels)
-        self.gru = nn.GRU(input_size=tcn_channels,
-                          hidden_size=gru_hidden_size,
-                          num_layers=num_gru_layers,
-                          batch_first=True)
-
-        # ---------------------------
-        # Fully Connected Layer: Map GRU output to Q-values for each action
-        # ---------------------------
+        self.gru = nn.GRU(tcn_channels, gru_hidden_size, num_layers=num_gru_layers, batch_first=True)
         self.fc = nn.Linear(gru_hidden_size, action_dim)
 
     def forward(self, x, hidden_state=None):
@@ -96,61 +62,30 @@ class HybridQNetwork(nn.Module):
         # The extra features appended by the environment are: 
         # [norm_adjusted_buy, norm_adjusted_sell, inventory, cash_ratio, norm_entry_diff]
         # We assume that the "inventory" (a proxy for whether entry_price is set) is at index: state_dim - 3.
-        last_state = x[:, -1, :]  # shape: (batch, state_dim)
+        if x.dim() == 2:  # (batch_size, state_dim)
+            x = x.unsqueeze(1).repeat(1, self.seq_length, 1)  # Expand to (batch_size, seq_length, state_dim)
+        last_state = x[:, -1, :]  # (batch_size, state_dim)
+        x = x.permute(0, 2, 1)  # (batch_size, state_dim, seq_length)
+        x = torch.relu(self.cnn(x))  # (batch_size, cnn_channels, seq_length)
+        x = self.tcn(x)  # (batch_size, tcn_channels, seq_length)
+        x = x.permute(0, 2, 1)  # (batch_size, seq_length, tcn_channels)
+        gru_out, _ = self.gru(x)  # (batch_size, seq_length, gru_hidden_size)
+        q_values = self.fc(torch.relu(gru_out[:, -1, :]))  # (batch_size, action_dim)
 
-        # Permute input to shape (batch, state_dim, seq_length) for CNN.
-        x = x.permute(0, 2, 1)
-        # Apply CNN and a ReLU activation.
-        x = torch.relu(self.cnn(x))  # (batch, cnn_channels, seq_length)
-        # Apply TCN block.
-        x = self.tcn(x)  # (batch, tcn_channels, seq_length)
-        # Permute back to (batch, seq_length, tcn_channels) for GRU.
-        x = x.permute(0, 2, 1)
-        # Pass through the GRU layer(s); we only need the output.
-        gru_out, _ = self.gru(x)  # (batch, seq_length, gru_hidden_size)
-        # Select the output from the last timestep.
-        last_out = gru_out[:, -1, :]  # (batch, gru_hidden_size)
-        # Optionally apply ReLU and map to Q-values.
-        q_values = self.fc(torch.relu(last_out))
-        
-        # --- Action Inhibition and Discouragement ---
-        # Use the entry_price at index state_dim - 1 to determine position status
-        entry_price_index = self.state_dim - 1
-        entry_price = last_state[:, entry_price_index]  # shape: (batch,)
-
-        # Define a threshold to consider entry_price as "zero" (accounting for float precision)
-        EPSILON = 1e-6
-        has_position = (torch.abs(entry_price) > EPSILON).float()  # 1.0 if position open, 0.0 if not
-
-        # Disable invalid actions with a large negative penalty
-        LARGE_PENALTY = -1e6  # Sufficiently large to ensure selection avoidance
-        
-        # Buy (action 1): Disable if a position is already open (has_position == 1)
-        mask_buy = (1.0 - has_position)  # 1.0 if no position, 0.0 if position exists
-        q_values[:, 1] = q_values[:, 1] * mask_buy + (1.0 - mask_buy) * LARGE_PENALTY
-
-        # Sell (action 2): 
-        # - Disable if no position (has_position == 0)
-        # - Slightly discourage (not disable) if position exists and entry_price < 0
-        mask_sell = has_position  # 1.0 if position exists, 0.0 if not
-        discourage_sell = (entry_price < 0.0).float() * has_position  # 1.0 if position exists and entry_price < 0
-        DISCOURAGE_PENALTY = -0.1  # Small penalty to discourage selling at a loss
-        q_values[:, 2] = (
-            q_values[:, 2] * mask_sell +  # Base Q-value if sell is valid
-            (1.0 - mask_sell) * LARGE_PENALTY +  # Disable sell if no position
-            discourage_sell * DISCOURAGE_PENALTY  # Slight penalty if selling at a loss
-        )
-
+        entry_price = last_state[:, self.state_dim - 1]  # (batch_size,)
+        has_position = (torch.abs(entry_price) > 1e-6).float()
+        q_values[:, 1] = q_values[:, 1] * (1.0 - has_position) + has_position * -1e6
+        discourage_sell = (entry_price < 0.0).float() * has_position
+        q_values[:, 2] = q_values[:, 2] * has_position + (1.0 - has_position) * -1e6 - discourage_sell * 0.1
         return q_values, None
 
 # ---------------------------
 # DQN Agent Using the HybridQNetwork
 # ---------------------------
 class DQNAgent:
-    def __init__(self, state_dim, action_dim, lr=1e-4, gamma=0.99,
-                 epsilon=1.0, epsilon_decay=0.99, epsilon_min=0.01,
-                 seq_length=1440, buffer_capacity=10000,
-                 per_alpha=0.6, per_beta=0.4, per_beta_increment=0.001):
+    def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99,
+                 epsilon=1.0, epsilon_decay=0.995,
+                 epsilon_min=0.01, seq_length=1440, buffer_capacity=5000):
         """
         DQN Agent that uses the HybridQNetwork (CNN -> TCN -> GRU -> FC) for Q-learning.
 
@@ -183,31 +118,15 @@ class DQNAgent:
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
         self.seq_length = seq_length
-
-        # Initialize the hybrid Q-network and the target network.
-        self.q_net = HybridQNetwork(state_dim, action_dim).to(self.device)
-        self.target_net = HybridQNetwork(state_dim, action_dim).to(self.device)
+        self.q_net = HybridQNetwork(state_dim, action_dim, seq_length=seq_length).to(self.device)
+        self.target_net = HybridQNetwork(state_dim, action_dim, seq_length=seq_length).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())
-
-        # Set up the optimizer.
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
-        # Learning rate scheduler (optional).
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, factor=0.9, patience=10)
-        # Mixed precision training support (if using CUDA).
         self.scaler = torch.amp.GradScaler() if self.device.type == "cuda" else None
-
-        # (For simplicity, the PrioritizedReplayBuffer class is assumed to be defined elsewhere in your project.)
-        # Here you would import it if needed:
-        # from your_module import PrioritizedReplayBuffer
-        # For now, we assume a simple list as a buffer.
-        self.buffer = []  # Replace with PER buffer if available
+        self.buffer = deque(maxlen=buffer_capacity)  # Efficient deque
         self.batch_size = 64
         self.update_target_every = 100
         self.step_count = 0
-
-        # PER parameters.
-        self.per_beta = per_beta
-        self.per_beta_increment = per_beta_increment
 
     def _ensure_history(self, state):
         """
@@ -222,20 +141,13 @@ class DQNAgent:
         Returns:
             np.array: State with shape (seq_length, state_dim).
         """
-        state = np.array(state)
+        state = np.asarray(state, dtype=np.float32)  # Faster conversion
         if state.ndim == 1:
-            # Tile the single state to form a sequence.
-            state = np.tile(state, (self.seq_length, 1))
-        elif state.shape[0] != self.seq_length:
-            pad_size = self.seq_length - state.shape[0]
-            if pad_size > 0:
-                # Pad by repeating the first row.
-                pad = np.repeat(state[0:1, :], pad_size, axis=0)
-                state = np.concatenate([state, pad], axis=0)
-            else:
-                # Truncate the state to the required sequence length.
-                state = state[:self.seq_length, :]
-        return state
+            return np.tile(state, (self.seq_length, 1))
+        pad_size = self.seq_length - state.shape[0]
+        if pad_size > 0:
+            return np.pad(state, ((0, pad_size), (0, 0)), mode='edge')
+        return state[:self.seq_length, :]
 
     def select_action(self, state):
         """
@@ -363,69 +275,42 @@ class DQNAgent:
             batch (list): A list of transitions, each a tuple:
                           (state, action, reward, next_state, done)
         """
-        # Process each transition to ensure states have shape (seq_length, state_dim)
-        processed_batch = []
-        for state, action, reward, next_state, done in batch:
-            state = self._ensure_history(state)
-            next_state = self._ensure_history(next_state)
-            processed_batch.append((state, action, reward, next_state, done))
-
-        # Unpack the processed transitions
-        states, actions, rewards, next_states, dones = zip(*processed_batch)
-
-        # Stack the individual states into a single tensor with shape:
-        # (batch, seq_length, state_dim)
+        states, actions, rewards, next_states, dones = zip(*batch)
         states = torch.from_numpy(np.stack(states)).float().to(self.device)
         next_states = torch.from_numpy(np.stack(next_states)).float().to(self.device)
-        actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
-        rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
-        dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
+        actions = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
+        rewards = torch.tensor(rewards, dtype=torch.float, device=self.device).unsqueeze(1)
+        dones = torch.tensor(dones, dtype=torch.float, device=self.device).unsqueeze(1)
 
         self.optimizer.zero_grad()
-
-        # Use mixed precision training if available
-        if self.scaler is not None:
+        # Use autocast only if scaler is available, otherwise proceed normally
+        if self.scaler:
             with torch.amp.autocast(device_type=self.device.type):
-                # Forward pass: Get Q-values for current states
                 q_values, _ = self.q_net(states)
-                q_values = q_values.gather(1, actions)  # Select Q-values for taken actions
-
-                # Target network: Get Q-values for next states and compute target values
+                q_values = q_values.gather(1, actions)
                 with torch.no_grad():
                     max_next_q, _ = self.target_net(next_states)
-                    max_next_q = max_next_q.max(1)[0].unsqueeze(1)
-                    target = rewards + self.gamma * max_next_q * (1 - dones)
-
-                # Compute mean squared TD error loss
-                loss = ((q_values - target) ** 2).mean()
-
-            # Backward pass with gradient scaling
+                    target = rewards + self.gamma * max_next_q.max(1)[0].unsqueeze(1) * (1 - dones)
+                loss = nn.functional.mse_loss(q_values, target)
             self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
-            # Standard precision training fallback
             q_values, _ = self.q_net(states)
             q_values = q_values.gather(1, actions)
             with torch.no_grad():
                 max_next_q, _ = self.target_net(next_states)
-                max_next_q = max_next_q.max(1)[0].unsqueeze(1)
-                target = rewards + self.gamma * max_next_q * (1 - dones)
-            loss = ((q_values - target) ** 2).mean()
+                target = rewards + self.gamma * max_next_q.max(1)[0].unsqueeze(1) * (1 - dones)
+            loss = nn.functional.mse_loss(q_values, target)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
             self.optimizer.step()
 
-        # Increment step count and update target network periodically
         self.step_count += 1
         if self.step_count % self.update_target_every == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
-
-        # Update the learning rate scheduler based on the current loss
-        self.scheduler.step(loss)
-
-        # Decay the exploration rate (epsilon)
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 

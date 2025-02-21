@@ -416,45 +416,66 @@ class GeneticOptimizer:
                    avg_reward is the average reward across episodes.
         """
         from src.rl_agent import DQNAgent
+        import gc
         seq_length = self.config.get('seq_length', 1440)
-        agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3, seq_length=seq_length)
         chunk_size = self.config.get('chunk_size', 4000)
-        full_data = env.data.copy()
-        all_indices = full_data.index
-        total_rewards = []
+        batch_frequency = 32  # Update policy every 32 steps
+
+        # Initialize agent
+        agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3, seq_length=seq_length)
+
+        # Preconvert full_data to NumPy array once
+        full_data_np = env.data.values  # Shape: (n_steps, features)
+        all_indices = np.arange(len(full_data_np))
+        total_reward_sum = 0.0
+        episode_count = 0
+        transition_buffer = []  # Temporary buffer for batch updates
 
         for ep in range(episodes):
             num_chunks = int(np.ceil(len(all_indices) / chunk_size))
             chunk_indices = [all_indices[i * chunk_size:(i + 1) * chunk_size] for i in range(num_chunks)]
-            random.shuffle(chunk_indices)
+            np.random.shuffle(chunk_indices)  # In-place shuffle
             ep_reward = 0.0
 
             for i, indices in enumerate(chunk_indices):
                 logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{num_chunks} (size {len(indices)} rows)...")
-                env.data = full_data.loc[indices]
-                env.data_values = env.data.values
-                env.n_steps = len(env.data)
-                env.timestamps_list = list(env.data.index)
-                state = env.reset()  # Full reset: cash, inventory, gain_loss
+                # Use NumPy array slicing instead of Pandas
+                env.data_values = full_data_np[indices]
+                env.n_steps = len(indices)
+                env.timestamps_list = env.data.index[indices].tolist()  # Only if needed for logging
+                state = env.reset()
                 chunk_reward = 0.0
                 done = False
+                step_count = 0
 
                 while not done:
                     action = agent.select_action(state)
                     next_state, reward, done, info = env.step(action)
-                    agent.store_transition(state, action, reward, next_state, done)
-                    agent.update_policy_from_batch([(state, action, reward, next_state, done)])
+                    transition_buffer.append((state, action, reward, next_state, done))
                     state = next_state
                     chunk_reward += reward
+                    step_count += 1
+
+                    # Update policy in batches
+                    if len(transition_buffer) >= batch_frequency or done:
+                        agent.update_policy_from_batch(transition_buffer)
+                        transition_buffer.clear()  # Clear to free memory
+                        gc.collect()  # Force garbage collection
 
                 ep_reward += chunk_reward
-                logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.2f} (last step: {info.get('n_step', 0)})")
-            
-            total_rewards.append(ep_reward)
+                logger.info(
+                    f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.2f} (last step: {info.get('n_step', 0)})")
+
+            total_reward_sum += ep_reward
+            episode_count += 1
             logger.info(f"Episode {ep + 1} completed. Total episode reward: {ep_reward:.2f}")
 
-        avg_reward = np.mean(total_rewards)
+        avg_reward = total_reward_sum / episode_count if episode_count > 0 else 0.0
         logger.info(f"RL training over {episodes} episodes completed. Average reward: {avg_reward:.2f}")
+
+        # Clean up
+        del full_data_np
+        gc.collect()
         return agent, avg_reward
 
     def evaluate_individuals(self, individuals):
