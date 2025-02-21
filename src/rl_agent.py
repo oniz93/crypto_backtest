@@ -72,10 +72,10 @@ class HybridQNetwork(nn.Module):
         gru_out, _ = self.gru(x)  # (batch_size, seq_length, gru_hidden_size)
         q_values = self.fc(torch.relu(gru_out[:, -1, :]))  # (batch_size, action_dim)
 
-        entry_price = last_state[:, self.state_dim - 1]  # (batch_size,)
-        has_position = (torch.abs(entry_price) > 1e-6).float()
+        gain_loss = last_state[:, self.state_dim - 1]  # (batch_size,)
+        has_position = (torch.abs(gain_loss) > 1e-6).float()
         q_values[:, 1] = q_values[:, 1] * (1.0 - has_position) + has_position * -1e6
-        discourage_sell = (entry_price < 0.0).float() * has_position
+        discourage_sell = (gain_loss < 0.0).float() * has_position
         q_values[:, 2] = q_values[:, 2] * has_position + (1.0 - has_position) * -1e6 - discourage_sell * 0.1
         return q_values, None
 
