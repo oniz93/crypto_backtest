@@ -147,7 +147,7 @@ class HybridQNetwork(nn.Module):
 # DQN Agent Using the HybridQNetwork
 # ---------------------------
 class DQNAgent:
-    def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99,
+    def __init__(self, state_dim, action_dim, lr=1e-4, gamma=0.99,
                  epsilon=1.0, epsilon_decay=0.99, epsilon_min=0.01,
                  seq_length=1440, buffer_capacity=10000,
                  per_alpha=0.6, per_beta=0.4, per_beta_increment=0.001):
@@ -327,7 +327,7 @@ class DQNAgent:
                     target = rewards + self.gamma * max_next_q * (1 - dones)
                 loss = ((q_values - target) ** 2).mean()
             self.scaler.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=10.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
@@ -339,7 +339,7 @@ class DQNAgent:
                 target = rewards + self.gamma * max_next_q * (1 - dones)
             loss = ((q_values - target) ** 2).mean()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=10.0)
             self.optimizer.step()
 
         self.step_count += 1

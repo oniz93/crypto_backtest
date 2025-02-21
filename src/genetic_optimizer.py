@@ -448,13 +448,13 @@ class GeneticOptimizer:
                     chunk_reward += reward
 
                 ep_reward += chunk_reward
-                logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.6f} (last step: {info.get('n_step', 0)})")
+                logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.2f} (last step: {info.get('n_step', 0)})")
             
             total_rewards.append(ep_reward)
-            logger.info(f"Episode {ep + 1} completed. Total episode reward: {ep_reward:.6f}")
+            logger.info(f"Episode {ep + 1} completed. Total episode reward: {ep_reward:.2f}")
 
         avg_reward = np.mean(total_rewards)
-        logger.info(f"RL training over {episodes} episodes completed. Average reward: {avg_reward:.6f}")
+        logger.info(f"RL training over {episodes} episodes completed. Average reward: {avg_reward:.2f}")
         return agent, avg_reward
 
     def evaluate_individuals(self, individuals):
