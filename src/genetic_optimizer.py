@@ -463,10 +463,10 @@ class GeneticOptimizer:
                         gc.collect()
                     if step_count % 1000 == 0:
                         logger.debug(f"Step {step_count}: Action time={action_time:.3f}s")
-                ep_reward += chunk_reward
                 if step_count < chunk_len:
-                    penalty_factory = step_count / chunk_len
-                    ep_reward *= (1 + penalty_factory)
+                    penalty_factory = (chunk_len - step_count) / chunk_len
+                    chunk_reward *= (1 + penalty_factory)
+                ep_reward += chunk_reward
                 logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.2f} "
                             f"(last step: {info.get('n_step', 0)})")
                 logger.info(f"Chunk {i + 1} took {time.time() - chunk_start_time:.2f}s")
