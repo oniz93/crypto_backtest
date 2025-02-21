@@ -160,7 +160,19 @@ class TradingEnvironment:
         reward = portfolio_after - portfolio_before - penalty
         self.gain_loss = self.inventory * (new_price - self.entry_price) - self.total_fees if self.inventory > 0 else 0.0
 
-        if done:
+        # Check balance stop condition
+        balance_threshold = 0.5 * self.initial_capital  # 50% of initial capital
+        if portfolio_after < balance_threshold and not done:
+            remaining_steps = self.n_steps - next_step
+            total_steps = self.n_steps
+            penalty_factor = remaining_steps / total_steps
+            reward *= (1 + penalty_factor)  # Increase negative reward
+            done = True  # Terminate chunk early
+            logger.info(f"[{current_timestamp}] Stopped at Step {next_step}: Balance {portfolio_after:.2f} < {balance_threshold:.2f}, "
+                        f"Adjusted reward: {reward:.2f} (factor: {penalty_factor:.2f})")
+
+        # Apply terminal reward if naturally done
+        if done and next_step >= self.n_steps:  # Only for natural end, not balance stop
             net_profit = portfolio_after - self.initial_capital
             reward = net_profit
             if net_profit > 0:
@@ -171,7 +183,6 @@ class TradingEnvironment:
         next_state = self._get_state(next_step) if not done else np.zeros(self.state_dim)
         self.current_step = next_step
         if self.current_step % 1000 == 0:
-            logger.info(
-                f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")
+            logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")
 
         return next_state, reward, done, {"n_step": next_step}
