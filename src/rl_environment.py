@@ -10,23 +10,11 @@ It is designed to be used by the RL agent.
 import logging
 import numpy as np
 
-# Use the GeneticOptimizer logger for consistency.
 logger = logging.getLogger('GeneticOptimizer')
 
 class TradingEnvironment:
     def __init__(self, price_data, indicators, mode="long", initial_capital=100000,
                  transaction_cost=0.005, max_steps=500000):
-        """
-        Initialize the trading environment.
-
-        Parameters:
-            price_data (pd.DataFrame): DataFrame containing price data.
-            indicators (pd.DataFrame): DataFrame containing technical indicators.
-            mode (str): Trading mode ('long' or 'short').
-            initial_capital (float): Starting capital.
-            transaction_cost (float): Fractional transaction fee.
-            max_steps (int): Maximum number of timesteps to simulate.
-        """
         from src.utils import normalize_price_vec, normalize_volume_vec, normalize_diff_vec
         self.initial_capital = initial_capital
         self.transaction_cost = transaction_cost
@@ -39,7 +27,7 @@ class TradingEnvironment:
         self.n_steps = len(self.data_values)
         self.timestamps_list = self.data.index.tolist()
 
-        # Precompute normalized features using vectorized functions
+        # Precompute normalized features
         self.norm_features = np.zeros_like(self.data_values, dtype=np.float32)
         for i, col in enumerate(self.columns):
             if col in ['open', 'high', 'low', 'close']:
@@ -58,15 +46,10 @@ class TradingEnvironment:
         self.reset()
 
     def reset(self):
-        """
-        Reset the environment to its initial state.
-
-        Returns:
-            np.array: The initial state vector.
-        """
         self.entry_price = 0.0
+        self.buy_fee_per_share = 0.0  # New variable to track buy fees per share
         self.gain_loss = 0.0
-        self.total_fees = 0.0  # Reset fees
+        self.total_fees = 0.0
         self.current_step = 0
         self.cash = self.initial_capital
         self.inventory = 0
@@ -74,27 +57,13 @@ class TradingEnvironment:
         return self._get_state()
 
     def _get_state(self, step=None):
-        """
-        Build the state vector for the given timestep.
-
-        The state vector includes:
-          - Normalized market features (e.g., price, volume).
-          - Extra features: normalized adjusted buy price, normalized adjusted sell price,
-            current inventory, cash ratio, and normalized gain/loss.
-
-        Parameters:
-            step (int): Timestep index for which to generate the state.
-
-        Returns:
-            np.array: The state vector.
-        """
         from src.utils import normalize_price_vec, normalize_diff_vec
         step = self.current_step if step is None else step
         row = self.norm_features[step]
         close_price = self.data_values[step, self.close_index]
         norm_adjusted_buy = normalize_price_vec(np.array([close_price * (1 + self.transaction_cost)]))[0]
         norm_adjusted_sell = normalize_price_vec(np.array([close_price / (1 + self.transaction_cost)]))[0]
-        norm_gain_loss = normalize_diff_vec(np.array([self.gain_loss], dtype=np.float32), max_diff=10000)[0]
+        norm_gain_loss = normalize_diff_vec(np.array([self.gain_loss], dtype=np.float32), max_diff=2000)[0]  # Updated max_diff
         extra_features = np.array([norm_adjusted_buy, norm_adjusted_sell, self.inventory,
                                    self.cash / self.initial_capital, norm_gain_loss], dtype=np.float32)
         return np.concatenate([row, extra_features])
@@ -105,6 +74,7 @@ class TradingEnvironment:
         current_timestamp = self.timestamps_list[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
         penalty = 0.0
         trade_fraction = 0.1
+        realized_gain_loss = 0.0
 
         if action == 1:  # Buy
             if self.inventory < 0:
@@ -121,18 +91,23 @@ class TradingEnvironment:
                         penalty = 0.01 * portfolio_before
                     else:
                         qty = buy_usd / current_price
+                        buy_fee_per_share = transaction_fee / qty
                         if self.inventory > 0:
                             old_value = self.inventory * self.entry_price
+                            old_fees = self.inventory * self.buy_fee_per_share
                             new_value = qty * current_price
+                            new_fees = transaction_fee
                             total_qty = self.inventory + qty
                             self.entry_price = (old_value + new_value) / total_qty
-                            self.inventory = total_qty
+                            self.buy_fee_per_share = (old_fees + new_fees) / total_qty
                         else:
                             self.entry_price = current_price
-                            self.inventory = qty
+                            self.buy_fee_per_share = buy_fee_per_share
+                        self.inventory = self.inventory + qty if self.inventory > 0 else qty
                         self.cash -= total_cost
                         logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Buy, Spent={total_cost:.2f}, "
-                                     f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, New Cash={self.cash:.2f}")
+                                     f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, Buy Fee/Share={self.buy_fee_per_share:.6f}, "
+                                     f"New Cash={self.cash:.2f}")
 
         elif action == 2:  # Sell
             if self.inventory <= 0:
@@ -142,11 +117,12 @@ class TradingEnvironment:
                 transaction_fee = proceeds * self.transaction_cost
                 self.total_fees += transaction_fee
                 proceeds_after_fee = proceeds - transaction_fee
-                cost_basis = self.inventory * self.entry_price
+                cost_basis = self.inventory * (self.entry_price + self.buy_fee_per_share)
                 realized_gain_loss = proceeds_after_fee - cost_basis
                 self.cash += proceeds_after_fee
                 self.inventory = 0.0
                 self.entry_price = 0.0
+                self.buy_fee_per_share = 0.0
                 logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Sell, Proceeds={proceeds:.2f}, "
                              f"Fee={transaction_fee:.2f}, Net Proceeds={proceeds_after_fee:.2f}, "
                              f"Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
@@ -156,23 +132,41 @@ class TradingEnvironment:
         new_price = self.data_values[next_step][self.close_index] if not done else current_price
         portfolio_after = self.cash + self.inventory * new_price
 
-        # Reward: Change in portfolio value minus penalty
+        # Base reward
         reward = portfolio_after - portfolio_before - penalty
-        self.gain_loss = self.inventory * (new_price - self.entry_price) - self.total_fees if self.inventory > 0 else 0.0
 
-        # Check balance stop condition
-        balance_threshold = 0.5 * self.initial_capital  # 50% of initial capital
+        # Update gain_loss
+        if self.inventory > 0:
+            self.gain_loss = self.inventory * (new_price - self.entry_price) - self.inventory * self.buy_fee_per_share - self.total_fees
+        else:
+            self.gain_loss = 0.0
+
+        # Enhanced reward shaping for profitable sells
+        if action == 2 and self.inventory == 0.0:  # After a sell
+            if realized_gain_loss > 0:
+                # Exponential bonus: e^(gain_loss / scale) - 1, capped for stability
+                scale = 1000.0  # Adjust based on typical gain_loss magnitude (e.g., 1000-2000)
+                bonus = min(np.exp(realized_gain_loss / scale) - 1, 1000.0) * 100  # Cap at 1000, scale up
+                reward += bonus
+                logger.debug(f"[{current_timestamp}] Profitable sell! Gain={realized_gain_loss:.2f}, Bonus={bonus:.2f}")
+            elif realized_gain_loss < 0:
+                # Optional: Increase penalty for unprofitable sells
+                penalty = realized_gain_loss * 1.5  # Amplify negative impact
+                reward += penalty
+                logger.debug(f"[{current_timestamp}] Unprofitable sell. Gain={realized_gain_loss:.2f}, Penalty={penalty:.2f}")
+
+        # Balance stop condition
+        balance_threshold = 0.5 * self.initial_capital
         if portfolio_after < balance_threshold and not done:
             remaining_steps = self.n_steps - next_step
             total_steps = self.n_steps
             penalty_factor = remaining_steps / total_steps
-            reward *= (1 + penalty_factor)  # Increase negative reward
-            done = True  # Terminate chunk early
+            reward *= (1 + penalty_factor)
+            done = True
             logger.info(f"[{current_timestamp}] Stopped at Step {next_step}: Balance {portfolio_after:.2f} < {balance_threshold:.2f}, "
                         f"Adjusted reward: {reward:.2f} (factor: {penalty_factor:.2f})")
 
-        # Apply terminal reward if naturally done
-        if done and next_step >= self.n_steps:  # Only for natural end, not balance stop
+        if done and next_step >= self.n_steps:
             net_profit = portfolio_after - self.initial_capital
             reward = net_profit
             if net_profit > 0:

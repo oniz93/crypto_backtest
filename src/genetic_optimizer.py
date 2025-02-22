@@ -422,8 +422,8 @@ class GeneticOptimizer:
         chunk_size = self.config.get('chunk_size', 4000)
         batch_frequency = 32
 
-        agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3, seq_length=seq_length,
-                         epsilon_decay=0.999)
+        agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3, seq_length=seq_length, epsilon_decay=0.995)
+        agent.env = env  # Enable access to env.gain_loss and env.inventory
         full_data_np = env.data.values
         all_indices = np.arange(len(full_data_np))
         total_reward_sum = 0.0

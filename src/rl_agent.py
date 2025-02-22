@@ -21,9 +21,7 @@ from collections import deque
 # Hybrid Q-Network: CNN -> TCN -> GRU -> Fully Connected Layer
 # ---------------------------
 class HybridQNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim, cnn_channels=16,
-                 tcn_channels=16, gru_hidden_size=16, num_tcn_layers=1,
-                 num_gru_layers=1, seq_length=720):
+    def __init__(self, state_dim, action_dim, cnn1_channels=16, cnn2_channels=8, seq_length=360):
         """
         Hybrid Q-Network that implements a processing pipeline:
         CNN -> TCN -> GRU -> Fully Connected Layer.
@@ -40,12 +38,15 @@ class HybridQNetwork(nn.Module):
         super(HybridQNetwork, self).__init__()
         self.state_dim = state_dim
         self.seq_length = seq_length
-        self.cnn = nn.Conv1d(state_dim, cnn_channels, kernel_size=3, padding=1)
-        tcn_layers = [nn.Conv1d(cnn_channels, tcn_channels, kernel_size=3, padding=2, dilation=2),
-                      nn.ReLU()]
-        self.tcn = nn.Sequential(*tcn_layers)
-        self.gru = nn.GRU(tcn_channels, gru_hidden_size, num_layers=num_gru_layers, batch_first=True)
-        self.fc = nn.Linear(gru_hidden_size, action_dim)
+        self.cnn1 = nn.Conv1d(state_dim, cnn1_channels, kernel_size=3, padding=1)
+        self.cnn2 = nn.Conv1d(cnn1_channels, cnn2_channels, kernel_size=3, stride=2)
+
+        # Calculate output size of cnn2
+        cnn1_out_length = seq_length  # padding=1 preserves length
+        cnn2_out_length = (cnn1_out_length - 3 + 1) // 2  # stride=2, no padding
+        fc_input_size = cnn2_channels * cnn2_out_length  # e.g., 8 * 179 = 1432
+        self.fc = nn.Linear(fc_input_size, action_dim)
+        print(f"Initialized fc with input size: {fc_input_size}")
 
     def forward(self, x, hidden_state=None):
         """
@@ -62,30 +63,59 @@ class HybridQNetwork(nn.Module):
         # The extra features appended by the environment are: 
         # [norm_adjusted_buy, norm_adjusted_sell, inventory, cash_ratio, norm_entry_diff]
         # We assume that the "inventory" (a proxy for whether entry_price is set) is at index: state_dim - 3.
-        if x.dim() == 2:  # (batch_size, state_dim)
-            x = x.unsqueeze(1).repeat(1, self.seq_length, 1)  # Expand to (batch_size, seq_length, state_dim)
-        last_state = x[:, -1, :]  # (batch_size, state_dim)
-        x = x.permute(0, 2, 1)  # (batch_size, state_dim, seq_length)
-        x = torch.relu(self.cnn(x))  # (batch_size, cnn_channels, seq_length)
-        x = self.tcn(x)  # (batch_size, tcn_channels, seq_length)
-        x = x.permute(0, 2, 1)  # (batch_size, seq_length, tcn_channels)
-        gru_out, _ = self.gru(x)  # (batch_size, seq_length, gru_hidden_size)
-        q_values = self.fc(torch.relu(gru_out[:, -1, :]))  # (batch_size, action_dim)
+        if x.dim() == 2:
+            x = x.unsqueeze(1).repeat(1, self.seq_length, 1)
+        last_state = x[:, -1, :]
+        x = x.permute(0, 2, 1)  # (batch, state_dim, seq_length)
+        x = torch.relu(self.cnn1(x))  # (batch, cnn1_channels, seq_length)
+        x = torch.relu(self.cnn2(x))  # (batch, cnn2_channels, seq_length // 2-ish)
+        x = x.view(x.size(0), -1)  # Flatten
+        q_values = self.fc(x)
 
-        gain_loss = last_state[:, self.state_dim - 1]  # (batch_size,)
+        gain_loss = last_state[:, self.state_dim - 1]
         has_position = (torch.abs(gain_loss) > 1e-6).float()
         q_values[:, 1] = q_values[:, 1] * (1.0 - has_position) + has_position * -1e6
         discourage_sell = (gain_loss < 0.0).float() * has_position
         q_values[:, 2] = q_values[:, 2] * has_position + (1.0 - has_position) * -1e6 - discourage_sell * 0.1
         return q_values, None
 
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity, alpha=0.7):  # Increase alpha for stronger prioritization
+        self.buffer = deque(maxlen=capacity)
+        self.priorities = deque(maxlen=capacity)
+        self.alpha = alpha
+
+    def append(self, transition):
+        state, action, reward, next_state, done, gain_loss, is_profitable_sell = transition
+        # High priority for profitable sells, moderate for others
+        priority = 1000.0 if is_profitable_sell else max(abs(gain_loss), 0.1)  # Boost profitable sells
+        self.buffer.append((state, action, reward, next_state, done, gain_loss, is_profitable_sell))
+        self.priorities.append(priority ** self.alpha)
+
+    def sample(self, batch_size):
+        priorities = np.array(self.priorities, dtype=np.float32)
+        probs = priorities / priorities.sum()
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=False)
+        samples = [self.buffer[idx] for idx in indices]
+        weights = (len(self.buffer) * probs[indices]) ** (-0.4)
+        weights /= weights.max()
+        return samples, indices, torch.FloatTensor(weights)
+
+    def update_priorities(self, indices, td_errors):
+        for idx, error in zip(indices, td_errors):
+            self.priorities[idx] = (abs(error) + 0.01) ** self.alpha
+
+    def __len__(self):
+        return len(self.buffer)
+
+
 # ---------------------------
 # DQN Agent Using the HybridQNetwork
 # ---------------------------
 class DQNAgent:
-    def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99,
+    def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99, 
                  epsilon=1.0, epsilon_decay=0.999, epsilon_min=0.01,
-                 seq_length=720, buffer_capacity=5000):
+                 seq_length=360, buffer_capacity=5000):
         """
         DQN Agent that uses the HybridQNetwork (CNN -> TCN -> GRU -> FC) for Q-learning.
 
@@ -118,16 +148,16 @@ class DQNAgent:
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay  # Slower decay
         self.seq_length = seq_length  # Reduced to 720
-        self.q_net = HybridQNetwork(state_dim, action_dim, cnn_channels=16, tcn_channels=16,
-                                    gru_hidden_size=16, seq_length=seq_length).to(self.device)
-        self.target_net = HybridQNetwork(state_dim, action_dim, cnn_channels=16, tcn_channels=16,
-                                         gru_hidden_size=16, seq_length=seq_length).to(self.device)
+        self.buffer = PrioritizedReplayBuffer(buffer_capacity)
+        self.q_net = HybridQNetwork(state_dim, action_dim, cnn1_channels=16, cnn2_channels=8, seq_length=seq_length).to(self.device)
+        self.target_net = HybridQNetwork(state_dim, action_dim, cnn1_channels=16, cnn2_channels=8, seq_length=seq_length).to(self.device)
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.scaler = torch.amp.GradScaler() if self.device.type == "cuda" else None
         self.buffer = deque(maxlen=buffer_capacity)  # Efficient deque
         self.batch_size = 64
         self.update_target_every = 100
         self.step_count = 0
+        self.env = None
 
     def _ensure_history(self, state):
         """
@@ -205,11 +235,10 @@ class DQNAgent:
             reward (float): Reward received.
             done (bool): Whether the episode has ended.
         """
-        state = self._ensure_history(state)
-        next_state = self._ensure_history(next_state)
-        self.buffer.append((state, action, reward, next_state, done))
-        if len(self.buffer) > 10000:
-            self.buffer.pop(0)
+        gain_loss = self.env.gain_loss if hasattr(self.env, 'gain_loss') else 0.0
+        # Flag if this was a profitable sell (action=2 and previous gain_loss > 0)
+        is_profitable_sell = (action == 2 and gain_loss > 0 and self.env.inventory == 0.0) if hasattr(self.env, 'inventory') else False
+        self.buffer.append((state, action, reward, next_state, done, gain_loss, is_profitable_sell))
 
     def update_policy(self):
         """
