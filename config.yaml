@@ -7,7 +7,7 @@ PCT_QTY_ORDER: 0.1
 initial_balance: 100000
 treshold_price: 0.00001
 processing: local
-seq_length: 720
+seq_length: 1440
 timing: false
 chunk_size: 20000
 episodes: 20
