@@ -316,6 +316,8 @@ class DataLoader:
             length = int(params['length'])
             std_dev = float(params['std_dev'])
             bbands_df = ta.bbands(data['close'], length=length, std=std_dev).astype(float)
+            for col in bbands_df.columns:
+                bbands_df[col] = normalize_price_vec(bbands_df[col])  # Normalize as price-like values
             result = bbands_df.dropna()
         elif indicator_name == 'atr':
             length = int(params['length'])
@@ -438,6 +440,10 @@ class DataLoader:
             for col in cluster_columns:
                 data[col] = normalize_volume_vec(data[col])
             result = data[cluster_columns].dropna()
+        elif indicator_name == 'obv':
+            data['OBV'] = ta.obv(data['close'], data['volume']).astype(float)
+            data['OBV'] = normalize_volume_vec(data['OBV'])  # Treat as volume-like
+            result = data[['OBV']].dropna()
         else:
             raise ValueError(f"Indicator {indicator_name} is not implemented.")
 

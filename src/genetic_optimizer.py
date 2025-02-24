@@ -140,6 +140,10 @@ class GeneticOptimizer:
             },
             'rsi': {'length': (5, 30)},
             'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
+            'bbands': {'length': (10, 50), 'std_dev': (1.0, 3.0)},  # Bollinger Bands
+            'stoch': {'k': (5, 20), 'd': (3, 10)},  # Stochastic Oscillator
+            'atr': {'length': (5, 30)},  # Average True Range
+            'obv': {}  # On-Balance Volume (no parameters needed)
         }
 
     def create_parameter_indices(self):
