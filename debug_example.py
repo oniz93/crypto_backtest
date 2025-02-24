@@ -16,6 +16,8 @@ def debug_single():
         8, 21, 5, 8, 21, 5, 8, 21, 5, 8, 21, 5, 8, 21, 5, 8, 21, 5, 8, 21, 5, # MACD
         20, 2.0, 20, 2.0, 20, 2.0, 20, 2.0, 20, 2.0, 20, 2.0, 20, 2.0,  # BBands length, std_dev (7 timeframes)
         14, 3, 14, 3, 14, 3, 14, 3, 14, 3, 14, 3, 14, 3,  # Stoch k, d (7 timeframes)
+        14, 14, 14, 14, 14, 14, 14,  # ROC length (7 timeframes)
+        20, 20, 20, 20, 20, 20, 20,  # Hist_Vol length (7 timeframes)
         14, 14, 14, 14, 14, 14, 14,  # ATR length (7 timeframes)
         0.6, 0.6  # Model thresholds (buy, sell)
     ]

@@ -444,6 +444,17 @@ class DataLoader:
             data['OBV'] = ta.obv(data['close'], data['volume']).astype(float)
             data['OBV'] = normalize_volume_vec(data['OBV'])  # Treat as volume-like
             result = data[['OBV']].dropna()
+        elif indicator_name == 'roc':
+            length = int(params['length'])
+            data[f'ROC_{length}'] = ta.roc(data['close'], length=length).astype(float)
+            data[f'ROC_{length}'] = normalize_diff_vec(data[f'ROC_{length}'])
+            result = data[[f'ROC_{length}']].dropna()
+        elif indicator_name == 'hist_vol':
+            length = int(params['length'])
+            log_returns = np.log(data['close'] / data['close'].shift(1))
+            data[f'Hist_Vol_{length}'] = log_returns.rolling(window=length).std().astype(float)
+            data[f'Hist_Vol_{length}'] = normalize_diff_vec(data[f'Hist_Vol_{length}'])
+            result = data[[f'Hist_Vol_{length}']].dropna()
         else:
             raise ValueError(f"Indicator {indicator_name} is not implemented.")
 

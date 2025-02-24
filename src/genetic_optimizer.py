@@ -143,6 +143,8 @@ class GeneticOptimizer:
             'bbands': {'length': (10, 50), 'std_dev': (1.0, 3.0)},  # Bollinger Bands
             'stoch': {'k': (5, 20), 'd': (3, 10)},  # Stochastic Oscillator
             'atr': {'length': (5, 30)},  # Average True Range
+            'roc': {'length': (5, 30)},  # Rate of Change
+            'hist_vol': {'length': (5, 50)},  # Historical Volatility
             'obv': {}  # On-Balance Volume (no parameters needed)
         }
 
@@ -375,6 +377,23 @@ class GeneticOptimizer:
                 df = df.add_suffix(f'_{indicator_name}_{timeframe}')
                 # Join the indicator data to the features.
                 features_df = features_df.join(df)
+
+        # Dynamically extract the first column names from the RSI indicators.
+        rsi_1min_first_col = indicators['rsi']['1min'].columns[0]
+        rsi_5min_first_col = indicators['rsi']['5min'].columns[0]
+
+        # Since the 1min RSI data was joined with a suffix, its column name becomes:
+        # "{original_column_name}_rsi_1min"
+        rsi_1min = features_df[f'{rsi_1min_first_col}_rsi_1min']
+
+        # For the 5min RSI, reindex the original indicator data (using its first column)
+        # to match the 1min index.
+        rsi_5min = indicators['rsi']['5min'][rsi_5min_first_col].reindex(rsi_1min.index, method='ffill')
+
+        # Calculate the divergence.
+        rsi_divergence = rsi_1min - rsi_5min
+        features_df['RSI_Divergence'] = rsi_divergence
+
         # Drop any rows with missing values.
         features_df.dropna(inplace=True)
         # Filter the DataFrame based on the simulation start and end dates from the config.
