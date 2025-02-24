@@ -476,7 +476,10 @@ class GeneticOptimizer:
                     action = agent.select_action(state)
                     action_time = time.time() - action_start
                     next_state, reward, done, info = env.step(action)
-                    transition_buffer.append((state, action, reward, next_state, done))
+                    
+                    # Store copies of state and next_state to ensure they do not change later.
+                    transition_buffer.append((state.copy(), action, reward, next_state.copy(), done))
+                    
                     state = next_state
                     chunk_reward += reward
                     step_count += 1

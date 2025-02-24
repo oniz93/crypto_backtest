@@ -16,6 +16,7 @@ class TradingEnvironment:
     def __init__(self, price_data, indicators, mode="long", initial_capital=100000,
                  transaction_cost=0.005, max_steps=500000):
         from src.utils import normalize_price_vec, normalize_volume_vec, normalize_diff_vec
+        self.portfolio_history = [] # Track portfolio value history
         self.initial_capital = initial_capital
         self.transaction_cost = transaction_cost
         self.max_steps = max_steps
@@ -141,6 +142,20 @@ class TradingEnvironment:
         else:
             self.gain_loss = 0.0
 
+        # Penalize for excessive trading
+        if action in [1, 2]:  # Buy or Sell
+            reward -= 0.001 * portfolio_before  # Small penalty for each trade
+
+        # Bonus for sustained profitability (after 100 steps)
+        if self.current_step > 100:
+            recent_portfolio_values = self.portfolio_history[-100:]  # Last 100 steps
+            if all(val > self.initial_capital for val in recent_portfolio_values):
+                reward += 0.01 * portfolio_before  # Bonus for sustained profitability
+
+        # Risk-adjusted reward: penalize large drawdowns
+        if portfolio_after < 0.9 * self.initial_capital:  # If portfolio drops below 90% of initial capital
+            reward -= 0.05 * portfolio_before  # Penalty for large drawdown
+
         # Enhanced reward shaping for profitable sells
         if action == 2 and self.inventory == 0.0:  # After a sell
             if realized_gain_loss > 0:
@@ -178,5 +193,7 @@ class TradingEnvironment:
         self.current_step = next_step
         if self.current_step % 1000 == 0:
             logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")
+
+        self.portfolio_history.append(portfolio_after)
 
         return next_state, reward, done, {"n_step": next_step}

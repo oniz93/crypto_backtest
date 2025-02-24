@@ -21,9 +21,9 @@ from collections import deque
 # Hybrid Q-Network: CNN -> TCN -> GRU -> Fully Connected Layer
 # ---------------------------
 class HybridQNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim, cnn_channels=16,
-                 tcn_channels=16, gru_hidden_size=16, num_tcn_layers=1,
-                 num_gru_layers=1, seq_length=720):
+    def __init__(self, state_dim, action_dim, cnn_channels=128,
+                 tcn_channels=128, gru_hidden_size=128, num_tcn_layers=1,
+                 num_gru_layers=2, seq_length=720):
         """
         Hybrid Q-Network that implements a processing pipeline:
         CNN -> TCN -> GRU -> Fully Connected Layer.
@@ -62,15 +62,34 @@ class HybridQNetwork(nn.Module):
         # The extra features appended by the environment are: 
         # [norm_adjusted_buy, norm_adjusted_sell, inventory, cash_ratio, norm_entry_diff]
         # We assume that the "inventory" (a proxy for whether entry_price is set) is at index: state_dim - 3.
-        if x.dim() == 2:  # (batch_size, state_dim)
-            x = x.unsqueeze(1).repeat(1, self.seq_length, 1)  # Expand to (batch_size, seq_length, state_dim)
+        if x.dim() == 2:
+            # If input is (seq_length, state_dim), add batch dimension.
+            x = x.unsqueeze(0)
         last_state = x[:, -1, :]  # (batch_size, state_dim)
-        x = x.permute(0, 2, 1)  # (batch_size, state_dim, seq_length)
-        x = torch.relu(self.cnn(x))  # (batch_size, cnn_channels, seq_length)
-        x = self.tcn(x)  # (batch_size, tcn_channels, seq_length)
-        x = x.permute(0, 2, 1)  # (batch_size, seq_length, tcn_channels)
-        gru_out, _ = self.gru(x)  # (batch_size, seq_length, gru_hidden_size)
-        q_values = self.fc(torch.relu(gru_out[:, -1, :]))  # (batch_size, action_dim)
+        # Transpose to (batch, state_dim, seq_length) for CNN.
+        x = x.transpose(1, 2)
+
+        # Apply CNN layer.
+        x = self.cnn(x)  # now shape: (batch, cnn_channels, seq_length)
+
+        # Apply TCN block.
+        x = self.tcn(x)  # now shape: (batch, tcn_channels, seq_length)
+
+        # Transpose back to (batch, seq_length, tcn_channels) for the GRU.
+        x = x.transpose(1, 2)
+
+        # Initialize hidden state if not provided.
+        if hidden_state is None:
+            hidden_state = torch.zeros(self.gru.num_layers, x.size(0), self.gru.hidden_size, device=x.device)
+
+        # Pass through GRU.
+        x, hidden_state = self.gru(x, hidden_state)
+
+        # Take the output from the last timestep.
+        x = x[:, -1, :]
+
+        # Final fully connected layer to produce Q-values.
+        q_values = self.fc(x)
 
         gain_loss = last_state[:, self.state_dim - 1]  # (batch_size,)
         has_position = (torch.abs(gain_loss) > 1e-6).float()
@@ -118,10 +137,10 @@ class DQNAgent:
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay  # Slower decay
         self.seq_length = seq_length  # Reduced to 720
-        self.q_net = HybridQNetwork(state_dim, action_dim, cnn_channels=16, tcn_channels=16,
-                                    gru_hidden_size=16, seq_length=seq_length).to(self.device)
-        self.target_net = HybridQNetwork(state_dim, action_dim, cnn_channels=16, tcn_channels=16,
-                                         gru_hidden_size=16, seq_length=seq_length).to(self.device)
+        self.q_net = HybridQNetwork(state_dim, action_dim, cnn_channels=128, tcn_channels=128,
+                                    gru_hidden_size=128, seq_length=seq_length).to(self.device)
+        self.target_net = HybridQNetwork(state_dim, action_dim, cnn_channels=128, tcn_channels=128,
+                                    gru_hidden_size=128, seq_length=seq_length).to(self.device)
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.scaler = torch.amp.GradScaler() if self.device.type == "cuda" else None
         self.buffer = deque(maxlen=buffer_capacity)  # Efficient deque
@@ -227,8 +246,8 @@ class DQNAgent:
                           (state, action, reward, next_state, done)
         """
         states, actions, rewards, next_states, dones = zip(*batch)
-        states = torch.from_numpy(np.stack(states)).float().to(self.device)
-        next_states = torch.from_numpy(np.stack(next_states)).float().to(self.device)
+        states = torch.from_numpy(np.stack([self._ensure_history(s) for s in states])).float().to(self.device)
+        next_states = torch.from_numpy(np.stack([self._ensure_history(s) for s in next_states])).float().to(self.device)
         actions = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
         rewards = torch.tensor(rewards, dtype=torch.float, device=self.device).unsqueeze(1)
         dones = torch.tensor(dones, dtype=torch.float, device=self.device).unsqueeze(1)
