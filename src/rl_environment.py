@@ -70,14 +70,15 @@ class TradingEnvironment:
         return np.concatenate([row, extra_features])
 
     def step(self, action):
-        current_price = self.data_values[self.current_step][self.close_index]
-        portfolio_before = self.cash + self.inventory * current_price
-        current_timestamp = self.timestamps_list[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
-        penalty = 0.0
-        trade_fraction = 0.1
-        realized_gain_loss = 0.0
+    current_price = self.data_values[self.current_step][self.close_index]
+    portfolio_before = self.cash + self.inventory * current_price
+    current_timestamp = self.timestamps_list[self.current_step].strftime('%Y-%m-%d %H:%M:%S')
+    penalty = 0.0
+    trade_fraction = 0.1
+    realized_gain_loss = 0.0
 
-        if action == 1:  # Buy
+    if self.mode == "long":
+        if action == 1:  # Buy (long)
             if self.inventory < 0:
                 penalty = 0.02 * portfolio_before
             else:
@@ -107,10 +108,10 @@ class TradingEnvironment:
                         self.inventory = self.inventory + qty if self.inventory > 0 else qty
                         self.cash -= total_cost
                         logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Buy, Spent={total_cost:.2f}, "
-                                     f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, Buy Fee/Share={self.buy_fee_per_share:.6f}, "
-                                     f"New Cash={self.cash:.2f}")
+                                    f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, Buy Fee/Share={self.buy_fee_per_share:.6f}, "
+                                    f"New Cash={self.cash:.2f}")
 
-        elif action == 2:  # Sell
+        elif action == 2:  # Sell (long)
             if self.inventory <= 0:
                 penalty = 0.02 * portfolio_before
             else:
@@ -125,75 +126,125 @@ class TradingEnvironment:
                 self.entry_price = 0.0
                 self.buy_fee_per_share = 0.0
                 logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Sell, Proceeds={proceeds:.2f}, "
-                             f"Fee={transaction_fee:.2f}, Net Proceeds={proceeds_after_fee:.2f}, "
-                             f"Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
+                            f"Fee={transaction_fee:.2f}, Net Proceeds={proceeds_after_fee:.2f}, "
+                            f"Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
 
-        next_step = self.current_step + 1
-        done = next_step >= self.n_steps or next_step >= self.max_steps
-        new_price = self.data_values[next_step][self.close_index] if not done else current_price
-        portfolio_after = self.cash + self.inventory * new_price
+    elif self.mode == "short":
+        if action == 1:  # Sell (open short)
+            if self.inventory > 0:
+                penalty = 0.02 * portfolio_before
+            else:
+                sell_usd = trade_fraction * portfolio_before  # Use portfolio value since shorting borrows
+                if sell_usd < 100:
+                    penalty = 0.01 * portfolio_before
+                else:
+                    qty = sell_usd / current_price  # Quantity to short
+                    transaction_fee = sell_usd * self.transaction_cost
+                    self.total_fees += transaction_fee
+                    proceeds = sell_usd - transaction_fee
+                    if self.inventory < 0:  # Already short
+                        old_value = abs(self.inventory) * self.entry_price
+                        old_fees = abs(self.inventory) * self.buy_fee_per_share
+                        new_value = qty * current_price
+                        new_fees = transaction_fee
+                        total_qty = abs(self.inventory) + qty
+                        self.entry_price = (old_value + new_value) / total_qty
+                        self.buy_fee_per_share = (old_fees + new_fees) / total_qty
+                        self.inventory -= qty
+                    else:
+                        self.entry_price = current_price
+                        self.buy_fee_per_share = transaction_fee / qty
+                        self.inventory = -qty  # Negative inventory for short
+                    self.cash += proceeds  # Receive proceeds from short sale
+                    logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Short Sell, Proceeds={proceeds:.2f}, "
+                                f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, Short Fee/Share={self.buy_fee_per_share:.6f}, "
+                                f"New Cash={self.cash:.2f}")
 
-        # Base reward
-        reward = portfolio_after - portfolio_before - penalty
+        elif action == 2:  # Buy (close short)
+            if self.inventory >= 0:
+                penalty = 0.02 * portfolio_before
+            else:
+                qty_to_cover = abs(self.inventory)  # Cover entire short position
+                cost = qty_to_cover * current_price
+                transaction_fee = cost * self.transaction_cost
+                self.total_fees += transaction_fee
+                total_cost = cost + transaction_fee
+                proceeds_from_short = qty_to_cover * self.entry_price  # Original short sale proceeds adjusted
+                realized_gain_loss = proceeds_from_short - total_cost  # Profit if entry > current
+                self.cash -= total_cost
+                self.inventory = 0.0
+                self.entry_price = 0.0
+                self.buy_fee_per_share = 0.0
+                logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Buy to Cover, Cost={total_cost:.2f}, "
+                            f"Fee={transaction_fee:.2f}, Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
 
-        # Update gain_loss
-        if self.inventory > 0:
-            self.gain_loss = self.inventory * (new_price - self.entry_price) - self.inventory * self.buy_fee_per_share - self.total_fees
-        else:
-            self.gain_loss = 0.0
+    # Rest of the code remains largely the same
+    next_step = self.current_step + 1
+    done = next_step >= self.n_steps or next_step >= self.max_steps
+    new_price = self.data_values[next_step][self.close_index] if not done else current_price
+    portfolio_after = self.cash + self.inventory * new_price
 
-        # Penalize for excessive trading
-        if action in [1, 2]:  # Buy or Sell
-            reward -= 0.001 * portfolio_before  # Small penalty for each trade
+    # Base reward
+    reward = portfolio_after - portfolio_before - penalty
 
-        # Bonus for sustained profitability (after 100 steps)
-        if self.current_step > 100:
-            recent_portfolio_values = self.portfolio_history[-100:]  # Last 100 steps
-            if all(val > self.initial_capital for val in recent_portfolio_values):
-                reward += 0.01 * portfolio_before  # Bonus for sustained profitability
+    # Update gain_loss for both modes
+    if self.inventory > 0:  # Long position
+        self.gain_loss = self.inventory * (new_price - self.entry_price) - self.inventory * self.buy_fee_per_share - self.total_fees
+    elif self.inventory < 0:  # Short position
+        self.gain_loss = abs(self.inventory) * (self.entry_price - new_price) - abs(self.inventory) * self.buy_fee_per_share - self.total_fees
+    else:
+        self.gain_loss = 0.0
 
-        # Risk-adjusted reward: penalize large drawdowns
-        if portfolio_after < 0.9 * self.initial_capital:  # If portfolio drops below 90% of initial capital
-            reward -= 0.05 * portfolio_before  # Penalty for large drawdown
+    # Penalize for excessive trading
+    if action in [1, 2]:
+        reward -= 0.001 * portfolio_before
 
-        # Enhanced reward shaping for profitable sells
-        if action == 2 and self.inventory == 0.0:  # After a sell
-            if realized_gain_loss > 0:
-                # Exponential bonus: e^(gain_loss / scale) - 1, capped for stability
-                scale = 1000.0  # Adjust based on typical gain_loss magnitude (e.g., 1000-2000)
-                bonus = min(np.exp(realized_gain_loss / scale) - 1, 1000.0) * 100  # Cap at 1000, scale up
-                reward += bonus
-                logger.debug(f"[{current_timestamp}] Profitable sell! Gain={realized_gain_loss:.2f}, Bonus={bonus:.2f}")
-            elif realized_gain_loss < 0:
-                # Optional: Increase penalty for unprofitable sells
-                penalty = realized_gain_loss * 1.5  # Amplify negative impact
-                reward += penalty
-                logger.debug(f"[{current_timestamp}] Unprofitable sell. Gain={realized_gain_loss:.2f}, Penalty={penalty:.2f}")
+    # Bonus for sustained profitability
+    if self.current_step > 100:
+        recent_portfolio_values = self.portfolio_history[-100:]
+        if all(val > self.initial_capital for val in recent_portfolio_values):
+            reward += 0.01 * portfolio_before
 
-        # Balance stop condition
-        balance_threshold = 0.5 * self.initial_capital
-        if portfolio_after < balance_threshold and not done:
-            remaining_steps = self.n_steps - next_step
-            total_steps = self.n_steps
-            penalty_factor = remaining_steps / total_steps
-            reward *= (1 + penalty_factor)
-            done = True
-            logger.info(f"[{current_timestamp}] Stopped at Step {next_step}: Balance {portfolio_after:.2f} < {balance_threshold:.2f}, "
-                        f"Adjusted reward: {reward:.2f} (factor: {penalty_factor:.2f})")
+    # Risk-adjusted reward
+    if portfolio_after < 0.9 * self.initial_capital:
+        reward -= 0.05 * portfolio_before
 
-        if done and next_step >= self.n_steps:
-            net_profit = portfolio_after - self.initial_capital
-            reward = net_profit
-            if net_profit > 0:
-                reward += 5000
-            elif portfolio_after < 0.75 * self.initial_capital:
-                reward -= 10000
+    # Enhanced reward shaping for profitable trades
+    if action == 2 and self.inventory == 0.0:
+        if realized_gain_loss > 0:
+            scale = 1000.0
+            bonus = min(np.exp(realized_gain_loss / scale) - 1, 1000.0) * 100
+            reward += bonus
+            logger.debug(f"[{current_timestamp}] Profitable trade! Gain={realized_gain_loss:.2f}, Bonus={bonus:.2f}")
+        elif realized_gain_loss < 0:
+            penalty = realized_gain_loss * 1.5
+            reward += penalty
+            logger.debug(f"[{current_timestamp}] Unprofitable trade. Gain={realized_gain_loss:.2f}, Penalty={penalty:.2f}")
 
-        next_state = self._get_state(next_step) if not done else np.zeros(self.state_dim)
-        self.current_step = next_step
-        if self.current_step % 1000 == 0:
-            logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")
+    # Balance stop condition
+    balance_threshold = 0.5 * self.initial_capital
+    if portfolio_after < balance_threshold and not done:
+        remaining_steps = self.n_steps - next_step
+        total_steps = self.n_steps
+        penalty_factor = remaining_steps / total_steps
+        reward *= (1 + penalty_factor)
+        done = True
+        logger.info(f"[{current_timestamp}] Stopped at Step {next_step}: Balance {portfolio_after:.2f} < {balance_threshold:.2f}, "
+                    f"Adjusted reward: {reward:.2f} (factor: {penalty_factor:.2f})")
 
-        self.portfolio_history.append(portfolio_after)
+    if done and next_step >= self.n_steps:
+        net_profit = portfolio_after - self.initial_capital
+        reward = net_profit
+        if net_profit > 0:
+            reward += 5000
+        elif portfolio_after < 0.75 * self.initial_capital:
+            reward -= 10000
 
-        return next_state, reward, done, {"n_step": next_step}
+    next_state = self._get_state(next_step) if not done else np.zeros(self.state_dim)
+    self.current_step = next_step
+    if self.current_step % 1000 == 0:
+        logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")
+
+    self.portfolio_history.append(portfolio_after)
+
+    return next_state, reward, done, {"n_step": next_step}
