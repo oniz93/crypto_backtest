@@ -47,7 +47,7 @@ class HybridQNetwork(nn.Module):
         self.gru = nn.GRU(tcn_channels, gru_hidden_size, num_layers=num_gru_layers, batch_first=True)
         self.fc = nn.Linear(gru_hidden_size, action_dim)
 
-    def forward(self, x, hidden_state=None):
+    def forward(self, x, hidden_state=None, env=None):
         """
         Forward pass through the hybrid network.
 
@@ -63,40 +63,42 @@ class HybridQNetwork(nn.Module):
         # [norm_adjusted_buy, norm_adjusted_sell, inventory, cash_ratio, norm_entry_diff]
         # We assume that the "inventory" (a proxy for whether entry_price is set) is at index: state_dim - 3.
         if x.dim() == 2:
-            # If input is (seq_length, state_dim), add batch dimension.
             x = x.unsqueeze(0)
         last_state = x[:, -1, :]  # (batch_size, state_dim)
-        # Transpose to (batch, state_dim, seq_length) for CNN.
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2)  # (batch, state_dim, seq_length) for CNN
 
-        # Apply CNN layer.
-        x = self.cnn(x)  # now shape: (batch, cnn_channels, seq_length)
+        # Apply CNN layer
+        x = self.cnn(x)  # (batch, cnn_channels, seq_length)
+        x = self.tcn(x)  # (batch, tcn_channels, seq_length)
+        x = x.transpose(1, 2)  # (batch, seq_length, tcn_channels) for GRU
 
-        # Apply TCN block.
-        x = self.tcn(x)  # now shape: (batch, tcn_channels, seq_length)
-
-        # Transpose back to (batch, seq_length, tcn_channels) for the GRU.
-        x = x.transpose(1, 2)
-
-        # Initialize hidden state if not provided.
         if hidden_state is None:
             hidden_state = torch.zeros(self.gru.num_layers, x.size(0), self.gru.hidden_size, device=x.device)
 
-        # Pass through GRU.
+        # Pass through GRU
         x, hidden_state = self.gru(x, hidden_state)
+        x = x[:, -1, :]  # Take last timestep (batch, gru_hidden_size)
 
-        # Take the output from the last timestep.
-        x = x[:, -1, :]
+        # Compute Q-values
+        q_values = self.fc(x)  # (batch, action_dim)
 
-        # Final fully connected layer to produce Q-values.
-        q_values = self.fc(x)
+        # Adjust Q-values based on gain_loss and inventory if env is provided
+        if env is not None:
+            gain_loss = torch.tensor([env.gain_loss], dtype=torch.float32, device=x.device).expand(x.size(0))  # (batch,)
+            inventory = torch.tensor([env.inventory], dtype=torch.float32, device=x.device).expand(x.size(0))  # (batch,)
+            has_position = (torch.abs(inventory) > 1e-6).float()  # (batch,)
 
-        gain_loss = last_state[:, self.state_dim - 1]  # (batch_size,)
-        has_position = (torch.abs(gain_loss) > 1e-6).float()
-        q_values[:, 1] = q_values[:, 1] * (1.0 - has_position) + has_position * -1e6
-        discourage_sell = (gain_loss < 0.0).float() * has_position
-        q_values[:, 2] = q_values[:, 2] * has_position + (1.0 - has_position) * -1e6 - discourage_sell * 0.1
-        return q_values, None
+            # Discourage invalid actions
+            q_values[:, 1] = q_values[:, 1] * (1.0 - has_position) - has_position * 1e6  # Buy when position exists
+            q_values[:, 2] = q_values[:, 2] * has_position - (1.0 - has_position) * 1e6  # Sell when no position
+
+            # Inhibit sell (action 2) when gain_loss is negative
+            discourage_sell = (gain_loss < 0.0).float() * has_position
+            fee_penalty = torch.tensor([env.total_fees * 0.1], dtype=torch.float32, device=x.device).expand(
+                x.size(0))  # Scale penalty by fees
+            q_values[:, 2] -= discourage_sell * (torch.abs(gain_loss) + fee_penalty)  # Reduce sell Q-value proportionally
+
+        return q_values, hidden_state
 
 # ---------------------------
 # DQN Agent Using the HybridQNetwork
@@ -125,8 +127,8 @@ class DQNAgent:
         # Choose device.
         if torch.cuda.is_available():
             device = "cuda"
-        elif torch.backends.mps.is_available():
-            device = "mps"
+        # elif torch.backends.mps.is_available():
+        #     device = "mps"
         else:
             device = "cpu"
         self.device = torch.device(device)
@@ -140,7 +142,8 @@ class DQNAgent:
         self.q_net = HybridQNetwork(state_dim, action_dim, cnn_channels=128, tcn_channels=128,
                                     gru_hidden_size=128, seq_length=seq_length).to(self.device)
         self.target_net = HybridQNetwork(state_dim, action_dim, cnn_channels=128, tcn_channels=128,
-                                    gru_hidden_size=128, seq_length=seq_length).to(self.device)
+                                         gru_hidden_size=128, seq_length=seq_length).to(self.device)
+        self.env = None
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.scaler = torch.amp.GradScaler() if self.device.type == "cuda" else None
         self.buffer = deque(maxlen=buffer_capacity)  # Efficient deque
@@ -179,39 +182,28 @@ class DQNAgent:
         Returns:
             int: Chosen action index (0=hold, 1=buy, 2=sell).
         """
-        state = self._ensure_history(state)  # Ensure state has shape (seq_length, state_dim)
-        state_tensor = torch.FloatTensor(state).to(self.device).unsqueeze(0)  # Shape: (1, seq_length, state_dim)
+        state = self._ensure_history(state)
+        state_tensor = torch.FloatTensor(state).to(self.device).unsqueeze(0)
+        inventory = state[-1, self.state_dim - 2]  # Inventory is now at index -2
+        has_position = abs(inventory) > 1e-6
 
-        # Extract entry_price from the last timestep of the state (index state_dim - 1)
-        entry_price_index = self.state_dim - 1
-        entry_price = state[-1, entry_price_index]  # Last timestep, entry_price feature
-
-        # Define a small threshold for considering entry_price as zero (handles float precision)
-        EPSILON = 1e-6
-        has_position = abs(entry_price) > EPSILON  # True if a position is open
-
-        # Define valid actions based on position status
-        valid_actions = [0]  # Hold is always valid
+        valid_actions = [0]
         if not has_position:
-            valid_actions.append(1)  # Buy is valid if no position
+            valid_actions.append(1)
         if has_position:
-            valid_actions.append(2)  # Sell is valid if position exists
+            valid_actions.append(2)
 
         if np.random.rand() < self.epsilon:
-            # Exploration: randomly select from valid actions
             action = np.random.choice(valid_actions)
         else:
-            # Exploitation: use Q-network to select the best action
             with torch.no_grad():
-                q_values, _ = self.q_net(state_tensor)
-                # Mask invalid actions (though forward already does this, we reinforce it here)
-                q_values = q_values.cpu().numpy()[0]  # Shape: (action_dim,)
+                q_values, _ = self.q_net(state_tensor, env=self.env)  # Pass env to access gain_loss
+                q_values = q_values.cpu().numpy()[0]
                 if has_position:
-                    q_values[1] = float('-inf')  # Mask buy if position exists
+                    q_values[1] = float('-inf')
                 else:
-                    q_values[2] = float('-inf')  # Mask sell if no position
+                    q_values[2] = float('-inf')
                 action = np.argmax(q_values)
-
         return action
 
     def store_transition(self, state, action, reward, next_state, done):
@@ -253,13 +245,12 @@ class DQNAgent:
         dones = torch.tensor(dones, dtype=torch.float, device=self.device).unsqueeze(1)
 
         self.optimizer.zero_grad()
-        # Use autocast only if scaler is available, otherwise proceed normally
         if self.scaler:
             with torch.amp.autocast(device_type=self.device.type):
-                q_values, _ = self.q_net(states)
+                q_values, _ = self.q_net(states, env=self.env)  # Pass env here too
                 q_values = q_values.gather(1, actions)
                 with torch.no_grad():
-                    max_next_q, _ = self.target_net(next_states)
+                    max_next_q, _ = self.target_net(next_states, env=self.env)
                     target = rewards + self.gamma * max_next_q.max(1)[0].unsqueeze(1) * (1 - dones)
                 loss = nn.functional.mse_loss(q_values, target)
             self.scaler.scale(loss).backward()
@@ -268,10 +259,10 @@ class DQNAgent:
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
-            q_values, _ = self.q_net(states)
+            q_values, _ = self.q_net(states, env=self.env)
             q_values = q_values.gather(1, actions)
             with torch.no_grad():
-                max_next_q, _ = self.target_net(next_states)
+                max_next_q, _ = self.target_net(next_states, env=self.env)
                 target = rewards + self.gamma * max_next_q.max(1)[0].unsqueeze(1) * (1 - dones)
             loss = nn.functional.mse_loss(q_values, target)
             loss.backward()

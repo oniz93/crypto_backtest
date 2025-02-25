@@ -42,7 +42,7 @@ class TradingEnvironment:
             else:
                 self.norm_features[:, i] = self.data_values[:, i]
 
-        self.state_dim = self.data.shape[1] + 5
+        self.state_dim = self.data.shape[1] + 4
         self.action_dim = 3
         self.reset()
 
@@ -64,9 +64,8 @@ class TradingEnvironment:
         close_price = self.data_values[step, self.close_index]
         norm_adjusted_buy = normalize_price_vec(np.array([close_price * (1 + self.transaction_cost)]))[0]
         norm_adjusted_sell = normalize_price_vec(np.array([close_price / (1 + self.transaction_cost)]))[0]
-        norm_gain_loss = normalize_diff_vec(np.array([self.gain_loss], dtype=np.float32), max_diff=2000)[0]  # Updated max_diff
         extra_features = np.array([norm_adjusted_buy, norm_adjusted_sell, self.inventory,
-                                   self.cash / self.initial_capital, norm_gain_loss], dtype=np.float32)
+                                   self.cash / self.initial_capital], dtype=np.float32)  # Removed norm_gain_loss
         return np.concatenate([row, extra_features])
 
     def step(self, action):
