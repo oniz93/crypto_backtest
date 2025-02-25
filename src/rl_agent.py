@@ -94,7 +94,7 @@ class HybridQNetwork(nn.Module):
 
             # Inhibit sell (action 2) when gain_loss is negative
             discourage_sell = (gain_loss < 0.0).float() * has_position
-            fee_penalty = torch.tensor([env.total_fees * 0.1], dtype=torch.float32, device=x.device).expand(
+            fee_penalty = torch.tensor([env.total_fees * 0.4], dtype=torch.float32, device=x.device).expand(
                 x.size(0))  # Scale penalty by fees
             q_values[:, 2] -= discourage_sell * (torch.abs(gain_loss) + fee_penalty)  # Reduce sell Q-value proportionally
 

@@ -214,7 +214,7 @@ class TradingEnvironment:
                 scale = 1000.0
                 bonus = min(np.exp(realized_gain_loss / scale) - 1, 1000.0) * 100
                 reward += bonus
-                logger.debug(f"[{current_timestamp}] Profitable trade! Gain={realized_gain_loss:.2f}, Bonus={bonus:.2f}")
+                logger.debug(f"[{current_timestamp}] ---PROFITABLE TRADE--- Gain={realized_gain_loss:.2f}, Bonus={bonus:.2f}")
             elif realized_gain_loss < 0:
                 penalty = realized_gain_loss * 1.5
                 reward += penalty
