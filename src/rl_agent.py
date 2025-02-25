@@ -21,9 +21,9 @@ from collections import deque
 # Hybrid Q-Network: CNN -> TCN -> GRU -> Fully Connected Layer
 # ---------------------------
 class HybridQNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim, cnn_channels=128,
-                 tcn_channels=128, gru_hidden_size=128, num_tcn_layers=1,
-                 num_gru_layers=2, seq_length=720):
+    def __init__(self, state_dim, action_dim, cnn_channels=16,
+                 tcn_channels=16, gru_hidden_size=16, num_tcn_layers=1,
+                 num_gru_layers=1, seq_length=720):
         """
         Hybrid Q-Network that implements a processing pipeline:
         CNN -> TCN -> GRU -> Fully Connected Layer.
@@ -139,10 +139,8 @@ class DQNAgent:
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay  # Slower decay
         self.seq_length = seq_length  # Reduced to 720
-        self.q_net = HybridQNetwork(state_dim, action_dim, cnn_channels=128, tcn_channels=128,
-                                    gru_hidden_size=128, seq_length=seq_length).to(self.device)
-        self.target_net = HybridQNetwork(state_dim, action_dim, cnn_channels=128, tcn_channels=128,
-                                         gru_hidden_size=128, seq_length=seq_length).to(self.device)
+        self.q_net = HybridQNetwork(state_dim, action_dim, seq_length=seq_length).to(self.device)
+        self.target_net = HybridQNetwork(state_dim, action_dim, seq_length=seq_length).to(self.device)
         self.env = None
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.scaler = torch.amp.GradScaler() if self.device.type == "cuda" else None

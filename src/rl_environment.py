@@ -208,16 +208,20 @@ class TradingEnvironment:
         if portfolio_after < 0.9 * self.initial_capital:
             reward -= 0.05 * portfolio_before
 
+
+        is_sell = 0
         # Enhanced reward shaping for profitable trades
         if action == 2 and self.inventory == 0.0:
             if realized_gain_loss > 0:
                 scale = 1000.0
                 bonus = min(np.exp(realized_gain_loss / scale) - 1, 1000.0) * 100
                 reward += bonus
+                is_sell = 1
                 logger.debug(f"[{current_timestamp}] ---PROFITABLE TRADE--- Gain={realized_gain_loss:.2f}, Bonus={bonus:.2f}")
             elif realized_gain_loss < 0:
                 penalty = realized_gain_loss * 1.5
                 reward += penalty
+                is_sell = -1
                 logger.debug(f"[{current_timestamp}] Unprofitable trade. Gain={realized_gain_loss:.2f}, Penalty={penalty:.2f}")
 
         # Balance stop condition
@@ -246,4 +250,4 @@ class TradingEnvironment:
 
         self.portfolio_history.append(portfolio_after)
 
-        return next_state, reward, done, {"n_step": next_step}
+        return next_state, reward, done, {"n_step": next_step, "is_sell": is_sell, "gain_loss": realized_gain_loss}

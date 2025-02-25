@@ -470,6 +470,10 @@ class GeneticOptimizer:
                 done = False
                 step_count = 0
                 chunk_start_time = time.time()
+                profit_sells = 0
+                loss_sells = 0
+                profit_total = 0.0
+                loss_total = 0.0
 
                 while not done:
                     action_start = time.time()
@@ -483,6 +487,14 @@ class GeneticOptimizer:
                     state = next_state
                     chunk_reward += reward
                     step_count += 1
+                    is_sell = info.get('is_sell', 0)
+                    if is_sell == 1:
+                        profit_sells += 1
+                        profit_total += info.get('gain_loss', 0.0)
+                    elif is_sell == -1:
+                        loss_sells += 1
+                        loss_total += info.get('gain_loss', 0.0)
+
                     if len(transition_buffer) >= batch_frequency or done:
                         agent.update_policy_from_batch(transition_buffer)
                         transition_buffer.clear()
@@ -496,6 +508,8 @@ class GeneticOptimizer:
                 logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.2f} "
                             f"(last step: {info.get('n_step', 0)})")
                 logger.info(f"Chunk {i + 1} took {time.time() - chunk_start_time:.2f}s")
+                logger.info(f"Num profit sell {profit_sells} -> {profit_total:.2f}")
+                logger.info(f"Num loss sell {loss_sells} -> {loss_total:.2f}")
             total_reward_sum += ep_reward
             episode_count += 1
             logger.info(f"Episode {ep + 1} completed. Total episode reward: {ep_reward:.2f}")
