@@ -17,6 +17,7 @@ import sys
 import hashlib
 
 import numpy as np
+import pandas as pd2
 # -----------------------------------------------------------------------------
 # CONDITIONAL DATAFRAME LIBRARY IMPORT:
 # Use cuDF when CUDA is available, otherwise fallback to pandas.
@@ -25,19 +26,27 @@ try:
     import cupy as cp
     if cp.cuda.runtime.getDeviceCount() > 0:
         import cudf as pd
+        import dask_cudf  # Add dask_cudf import
         USING_CUDF = True
+        NUM_GPU = cp.cuda.runtime.getDeviceCount()  # Ensure consistency
     else:
         import pandas as pd
         USING_CUDF = False
+        NUM_GPU = 0
 except Exception:
     import pandas as pd
     USING_CUDF = False
+    NUM_GPU = 0
 
 from deap import base, creator, tools
 import ray
 from multiprocessing import Pool
 from src.config_loader import Config
 from src.data_loader import DataLoader
+
+
+import warnings
+warnings.filterwarnings("ignore")
 
 # Set up logging for the GeneticOptimizer.
 logger = logging.getLogger('GeneticOptimizer')
@@ -92,6 +101,8 @@ class GeneticOptimizer:
             'threshold_buy': (0.5, 0.9),
             'threshold_sell': (0.5, 0.9)
         }
+        # Use the timeframes from the data loader to differentiate frequency strings.
+        self.timeframes = self.data_loader.timeframes
         self.parameter_indices = self.create_parameter_indices()
         self.prepare_data()
         self.setup_deap()
@@ -106,13 +117,15 @@ class GeneticOptimizer:
             'vwap': {'offset': (0, 50)},
             'vwma': {'length': (5, 200)},
             'vpvr': {
-                '1min': {'width': (1000, 50000)},
-                '5min': {'width': (200, 10000)},
-                '15min': {'width': (100, 3500)},
-                '30min': {'width': (50, 2000)},
-                '1h': {'width': (30, 1000)},
-                '4h': {'width': (10, 250)},
-                '1d': {'width': (10, 60)},
+                # Note: The keys here should match the entries in self.timeframes.
+                # When using pandas, self.timeframes uses 1T/1D etc.
+                '1T': {'width': (1000, 50000)},
+                '5T': {'width': (200, 10000)},
+                '15T': {'width': (100, 3500)},
+                '30T': {'width': (50, 2000)},
+                '1H': {'width': (30, 1000)},
+                '4H': {'width': (10, 250)},
+                '1D': {'width': (10, 60)},
             },
             'rsi': {'length': (5, 30)},
             'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
@@ -130,21 +143,34 @@ class GeneticOptimizer:
         """
         parameter_indices = {}
         idx = 0
-        self.timeframes = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']
         for indicator_name, data in self.indicators.items():
-            if isinstance(data, dict):
-                if set(data.keys()).issubset(set(self.timeframes)):
-                    for tf, param_dict in data.items():
-                        for param_name, (low, high) in param_dict.items():
-                            parameter_indices[(indicator_name, param_name, tf)] = idx
-                            idx += 1
-                else:
-                    for param_name, (low, high) in data.items():
-                        for tf in self.timeframes:
-                            parameter_indices[(indicator_name, param_name, tf)] = idx
-                            idx += 1
-            else:
+            if not isinstance(data, dict):
                 raise ValueError(f"Indicators config for '{indicator_name}' must be a dict, got {type(data)}")
+            # Skip if data is empty (e.g., 'obv')
+            if not data:
+                continue
+            for tf in self.timeframes:
+                if tf in data:
+                    # Timeframe-specific parameters (e.g., 'vpvr')
+                    param_dict = data[tf]
+                    if not isinstance(param_dict, dict):
+                        raise ValueError(f"Timeframe '{tf}' for '{indicator_name}' must be a dict, got {type(param_dict)}")
+                    for param_name, limits in param_dict.items():
+                        try:
+                            low, high = limits
+                            parameter_indices[(indicator_name, param_name, tf)] = idx
+                            idx += 1
+                        except ValueError:
+                            raise ValueError(f"Indicator '{indicator_name}' timeframe '{tf}' param '{param_name}' has invalid limits: {limits}, expected (low, high)")
+                else:
+                    # Non-timeframe-specific parameters (e.g., 'vwap', 'rsi')
+                    for param_name, limits in data.items():
+                        try:
+                            low, high = limits
+                            parameter_indices[(indicator_name, param_name, tf)] = idx
+                            idx += 1
+                        except ValueError:
+                            raise ValueError(f"Indicator '{indicator_name}' param '{param_name}' has invalid limits: {limits}, expected (low, high)")
         for param_name in self.model_params.keys():
             parameter_indices[('model', param_name)] = idx
             idx += 1
@@ -182,7 +208,8 @@ class GeneticOptimizer:
             else:
                 indicator_name, param_name, timeframe = k
                 indicator_dict = self.indicators[indicator_name]
-                if set(indicator_dict.keys()).issubset(set(self.timeframes)):
+                # Check if parameters are provided per timeframe
+                if timeframe in indicator_dict:
                     low, high = indicator_dict[timeframe][param_name]
                 else:
                     low, high = indicator_dict[param_name]
@@ -201,7 +228,7 @@ class GeneticOptimizer:
             features_file = f"features/{hash_str}.parquet"
             if os.path.exists(features_file):
                 logger.info("Loading precomputed indicator features from file...")
-                features_df = pd.read_parquet(features_file)
+                features_df = pd.read_parquet(features_file)  # Always pandas for saved files
             else:
                 logger.info("Computing indicator features for individual (local mode)...")
                 indicators = self.load_indicators(config)
@@ -212,7 +239,8 @@ class GeneticOptimizer:
             indicators = self.load_indicators(config)
             features_df = self.prepare_features(indicators)
 
-        features_df = self.data_loader.filter_data_by_date(features_df,
+        features_df = self.data_loader.filter_data_by_date(
+            features_df,
             self.config.get('start_simulation'),
             self.config.get('end_simulation')
         )
@@ -267,13 +295,25 @@ class GeneticOptimizer:
             indicators[indicator_name] = {}
             for timeframe, params in timeframes_params.items():
                 indicator_df = self.data_loader.calculate_indicator(indicator_name, params, timeframe)
-                if timeframe != '1min':
-                    shift_duration = pd.to_timedelta(timeframe)
-                    indicator_df_shifted = indicator_df.copy()
-                    indicator_df_shifted.index = indicator_df_shifted.index - shift_duration
-                    indicator_df_1min = indicator_df_shifted.resample('1min').ffill()
-                    indicator_df_1min.dropna(inplace=True)
-                    indicator_df = indicator_df_1min
+                if USING_CUDF and NUM_GPU > 1:
+                    # Use dask_cudf for multi-GPU processing
+                    indicator_df = dask_cudf.from_cudf(indicator_df, npartitions=NUM_GPU)
+                    if timeframe != self.data_loader.base_timeframe:
+                        shift_duration = pd2.to_timedelta(timeframe)  # pandas for timedelta
+                        indicator_df_shifted = indicator_df.copy()
+                        indicator_df_shifted.index = indicator_df_shifted.index - shift_duration
+                        indicator_df_1min = indicator_df_shifted.compute().resample(self.data_loader.base_timeframe).ffill()
+                        indicator_df_1min.dropna(inplace=True)
+                        indicator_df = dask_cudf.from_cudf(indicator_df_1min, npartitions=NUM_GPU)
+                else:
+                    # Single GPU or CPU: keep as cuDF or pandas
+                    if timeframe != self.data_loader.base_timeframe:
+                        shift_duration = pd2.to_timedelta(timeframe)
+                        indicator_df_shifted = indicator_df.copy()
+                        indicator_df_shifted.index = indicator_df_shifted.index - shift_duration
+                        indicator_df_1min = indicator_df_shifted.resample(self.data_loader.base_timeframe).ffill()
+                        indicator_df_1min.dropna(inplace=True)
+                        indicator_df = indicator_df_1min
                 indicators[indicator_name][timeframe] = indicator_df
         return indicators
 
@@ -281,25 +321,36 @@ class GeneticOptimizer:
         """
         Concatenate the base price data with all indicator DataFrames.
         """
-        features_df = self.base_price_data.copy()
+        if USING_CUDF and NUM_GPU > 1:
+            features_df = dask_cudf.from_cudf(self.base_price_data.copy(), npartitions=NUM_GPU)
+        else:
+            features_df = self.base_price_data.copy()
+
         for indicator_name, tf_dict in indicators.items():
             for timeframe, df in tf_dict.items():
                 df.columns = [col.replace('\n', '').strip() for col in df.columns]
+                if USING_CUDF and NUM_GPU > 1 and not isinstance(df, dask_cudf.DataFrame):
+                    df = dask_cudf.from_cudf(df, npartitions=NUM_GPU)
                 df = df.reindex(features_df.index, method='ffill')
                 df = df.add_suffix(f'_{indicator_name}_{timeframe}')
                 features_df = features_df.join(df)
-        rsi_1min_first_col = indicators['rsi']['1min'].columns[0]
-        rsi_5min_first_col = indicators['rsi']['5min'].columns[0]
-        rsi_1min = features_df[f'{rsi_1min_first_col}_rsi_1min']
-        rsi_5min = indicators['rsi']['5min'][rsi_5min_first_col].reindex(rsi_1min.index, method='ffill')
+
+        rsi_1min_first_col = indicators['rsi'][self.data_loader.base_timeframe].columns[0]
+        rsi_5min_first_col = indicators['rsi']['5T'].columns[0]
+        rsi_1min = features_df[f'{rsi_1min_first_col}_rsi_{self.data_loader.base_timeframe}']
+        rsi_5min = indicators['rsi']['5T'][rsi_5min_first_col].reindex(rsi_1min.index, method='ffill')
         rsi_divergence = rsi_1min - rsi_5min
         features_df['RSI_Divergence'] = rsi_divergence
-        features_df.dropna(inplace=True)
+        features_df = features_df.dropna()
+
         filtered = self.data_loader.filter_data_by_date(
             features_df,
             self.config.get('start_simulation'),
             self.config.get('end_simulation')
         )
+        # Compute only if multi-GPU is used; otherwise, keep as is
+        if USING_CUDF and NUM_GPU > 1:
+            filtered = filtered.compute()
         return filtered
 
     def create_environment(self, price_data, indicators):
@@ -539,7 +590,7 @@ class GeneticOptimizer:
                 else:
                     indicator_name, param_name, timeframe = k
                     indicator_dict = self.indicators[indicator_name]
-                    if set(indicator_dict.keys()).issubset(set(self.timeframes)):
+                    if timeframe in indicator_dict:
                         low, high = indicator_dict[timeframe][param_name]
                     else:
                         low, high = indicator_dict[param_name]

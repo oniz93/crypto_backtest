@@ -20,9 +20,11 @@ try:
     if cp.cuda.runtime.getDeviceCount() > 0:
         import cudf as pd
         USING_CUDF = True
+        NUM_GPU = pd.cuda.get_device_count()
     else:
         import pandas as pd
         USING_CUDF = False
+        NUM_GPU = 0
 except Exception:
     import pandas as pd
     USING_CUDF = False

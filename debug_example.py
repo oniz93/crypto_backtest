@@ -4,6 +4,12 @@ from src.data_loader import DataLoader
 from src.genetic_optimizer import GeneticOptimizer
 
 def debug_single():
+    if USING_CUDF and NUM_GPU > 1:
+        cluster = LocalCUDACluster(n_workers=NUM_GPU, threads_per_worker=1, memory_limit="16GB")
+        client = Client(cluster)
+        dask.config.set({"dataframe.backend": "cudf"})
+        print(f"Debugging with {NUM_GPU} GPUs")
+
     data_loader = DataLoader()
     data_loader.import_ticks()
     data_loader.resample_data()
@@ -23,6 +29,10 @@ def debug_single():
     ]
     go = GeneticOptimizer(data_loader, session_id="debug123")
     go.debug_single_individual(params)
+    
+    if USING_CUDF and NUM_GPU > 1:
+        client.close()
+        cluster.close()
 
 if __name__ == "__main__":
     debug_single()

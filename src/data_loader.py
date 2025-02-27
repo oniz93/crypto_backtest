@@ -26,9 +26,11 @@ try:
     if cp.cuda.runtime.getDeviceCount() > 0:
         import cudf as pd
         USING_CUDF = True
+        NUM_GPU = pd.cuda.get_device_count()
     else:
         import pandas as pd
         USING_CUDF = False
+        NUM_GPU = 0
 except Exception:
     import pandas as pd
     USING_CUDF = False
@@ -59,7 +61,7 @@ def rsi(series, length):
 
 def macd(series, fast, slow, signal):
     """MACD indicator calculation.
-
+    
     Returns a DataFrame with three columns:
       - MACD line,
       - Signal line,
@@ -74,7 +76,7 @@ def macd(series, fast, slow, signal):
 
 def bbands(series, length, std):
     """Bollinger Bands calculation.
-
+    
     Returns a DataFrame with columns: Upper Band, Middle SMA, Lower Band.
     """
     sma_val = sma(series, length)
@@ -93,7 +95,7 @@ def atr(high, low, close, length):
 
 def stoch(high, low, close, k, d):
     """Stochastic Oscillator calculation.
-
+    
     Returns a DataFrame with %K and %D lines.
     """
     lowest_low = low.rolling(window=k).min()
@@ -403,11 +405,8 @@ def filter_data_by_date(df: pd.DataFrame, start_date: Union[str, datetime, date]
     Returns:
         pd.DataFrame: DataFrame containing only rows within the specified range.
     """
-    # Convert datetime.date to string if needed, because cuDF's to_datetime doesn't accept datetime.date.
-    if isinstance(start_date, date) and not isinstance(start_date, pd.Timestamp):
-        start_date = start_date.isoformat()
-    if isinstance(end_date, date) and not isinstance(end_date, pd.Timestamp):
-        end_date = end_date.isoformat()
+    start_date = start_date.isoformat()
+    end_date = end_date.isoformat()
 
     start_date = pd.to_datetime(start_date)
     end_date = pd.to_datetime(end_date)
@@ -434,13 +433,14 @@ class DataLoader:
             tick_data (dict): Dictionary to store data for different timeframes.
             config (Config): Configuration settings loaded from a YAML file.
             timeframes (list): List of timeframes for resampling.
-            base_timeframe (str): The main timeframe (e.g., '1min').
+            base_timeframe (str): The main timeframe.
             data_folder (str): Folder where data files are stored.
         """
         self.tick_data = {}
         self.config = Config()  # Load config parameters.
-        self.timeframes = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']
-        self.base_timeframe = '1min'
+        # Differentiate timeframes based on the library used.
+        self.timeframes = ['1T', '5T', '15T', '30T', '1H', '4H', '1D']
+        self.base_timeframe = '1T'
         self.data_folder = 'output_parquet/'
         self.cache = {}
         self.support_resistance = {}
@@ -671,25 +671,26 @@ class DataLoader:
             data['Chaikin_Osc'] = chaikin_osc(data['high'], data['low'], data['close'], data['volume'], fast=fast, slow=slow).astype(float)
             result = data[['Chaikin_Osc']].dropna()
 
+
         elif indicator_name == 'vwap':
             offset = int(params['offset'])
             data['VWAP'] = vwap(data['high'], data['low'], data['close'], data['volume'], offset=offset).astype(float)
             data['VWAP'] = normalize_diff_vec(data['VWAP'])
-            result = data[['VWAP']].dropna()
-            result = result.sub(data['close'], axis=0)
+            result = pd.DataFrame(data['VWAP'] - data['close'], columns=['VWAP']).dropna()
 
         elif indicator_name == 'vwma':
             length = int(params['length'])
             data['VWMA'] = vwma(data['close'], data['volume'], length=length).astype(float)
             data['VWMA'] = normalize_diff_vec(data['VWMA'])
-            result = data[['VWMA']].dropna()
-            result = result.sub(data['close'], axis=0)
+            result = pd.DataFrame(data['VWMA'] - data['close'], columns=['VWMA']).dropna()
 
         elif indicator_name == 'vpvr':
             width = int(params['width'])
             n_clusters = 100
             cluster_columns = [f'cluster_{i}' for i in range(n_clusters)]
-            clusters_df = pd.DataFrame(0.0, index=data.index, columns=cluster_columns)
+            # Fix: Use a dictionary to initialize clusters_df
+            data_dict = {col: np.zeros(len(data.index), dtype=np.float64) for col in cluster_columns}
+            clusters_df = pd.DataFrame(data_dict, index=data.index)
             data = data.join(clusters_df)
             volume_profile_df = incremental_vpvr_fixed_bins(data, width=n_clusters)
             new_clusters = volume_profile_df.copy()
@@ -721,6 +722,7 @@ class DataLoader:
         return result
 
     from datetime import datetime, date
+
     def filter_data_by_date(self, df: pd.DataFrame, start_date: Union[str, datetime, date],
                             end_date: Union[str, datetime, date]) -> pd.DataFrame:
         """
