@@ -9,10 +9,12 @@ It now supports both cuDF (when CUDA is available) and standard pandas.
 """
 
 import os
+from typing import Dict, Any, Union
+import numpy as np
 import time
 import logging
-import numpy as np
 from numba import njit
+from datetime import date
 
 # -----------------------------------------------------------------------------
 # CONDITIONAL DATAFRAME LIBRARY SELECTION:
@@ -388,17 +390,24 @@ def incremental_vpvr_fixed_bins(df: pd.DataFrame, width: int = 100,
     result_df = result_df.round(2)
     return result_df
 
-def filter_data_by_date(df: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
+def filter_data_by_date(df: pd.DataFrame, start_date: Union[str, pd.Timestamp, date],
+                        end_date: Union[str, pd.Timestamp, date]) -> pd.DataFrame:
     """
     Filter the DataFrame rows based on a date range.
 
     Parameters:
         df (pd.DataFrame): Input DataFrame.
-        start_date, end_date: Date range (as strings or Timestamps).
+        start_date, end_date: Date range (can be str, pd.Timestamp, or datetime.date).
 
     Returns:
         pd.DataFrame: DataFrame containing only rows within the specified range.
     """
+    # Convert datetime.date to string if needed, because cuDF's to_datetime doesn't accept datetime.date.
+    if isinstance(start_date, date) and not isinstance(start_date, pd.Timestamp):
+        start_date = start_date.isoformat()
+    if isinstance(end_date, date) and not isinstance(end_date, pd.Timestamp):
+        end_date = end_date.isoformat()
+
     start_date = pd.to_datetime(start_date)
     end_date = pd.to_datetime(end_date)
     if start_date > end_date:
@@ -710,22 +719,9 @@ class DataLoader:
             logger.info(f"Indicator {indicator_name} with params {params} on timeframe {timeframe} computed in {elapsed:.4f} seconds.")
         return result
 
-    def filter_data_by_date(self, df: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
+    def filter_data_by_date(self, df: pd.DataFrame, start_date: Union[str, pd.Timestamp, date],
+                            end_date: Union[str, pd.Timestamp, date]) -> pd.DataFrame:
         """
         Filter a DataFrame to include only rows between start_date and end_date.
         """
-        start_date = pd.to_datetime(start_date)
-        end_date = pd.to_datetime(end_date)
-        if start_date > end_date:
-            raise ValueError("start_date must be <= end_date")
-        if df.empty:
-            return df
-        if not isinstance(df.index, pd.DatetimeIndex):
-            try:
-                df.index = pd.to_datetime(df.index)
-                df.sort_index(inplace=True)
-            except Exception as e:
-                print(f"Error converting index to DatetimeIndex: {e}")
-                return df
-        filtered_df = df.loc[(df.index >= start_date) & (df.index <= end_date)]
-        return filtered_df
+        return filter_data_by_date(df, start_date, end_date)

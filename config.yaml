@@ -1,7 +1,7 @@
 start_simulation: 2023-06-01
-end_simulation: 2024-05-31
+end_simulation: 2023-06-30
 start_cutoff: 2022-01-01
-end_cutoff: 2024-05-31
+end_cutoff: 2023-06-30
 training_mode: "long"
 PCT_QTY_ORDER: 0.1
 initial_balance: 100000
@@ -12,4 +12,4 @@ timing: false
 chunk_size: 5000
 episodes: 20
 chunk_epochs: 10
-num_processes: 10
+num_processes: 5
