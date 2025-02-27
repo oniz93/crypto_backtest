@@ -390,8 +390,9 @@ def incremental_vpvr_fixed_bins(df: pd.DataFrame, width: int = 100,
     result_df = result_df.round(2)
     return result_df
 
-def filter_data_by_date(df: pd.DataFrame, start_date: Union[str, pd.Timestamp, date],
-                        end_date: Union[str, pd.Timestamp, date]) -> pd.DataFrame:
+from datetime import datetime, date
+def filter_data_by_date(df: pd.DataFrame, start_date: Union[str, datetime, date],
+                        end_date: Union[str, datetime, date]) -> pd.DataFrame:
     """
     Filter the DataFrame rows based on a date range.
 
@@ -719,8 +720,9 @@ class DataLoader:
             logger.info(f"Indicator {indicator_name} with params {params} on timeframe {timeframe} computed in {elapsed:.4f} seconds.")
         return result
 
-    def filter_data_by_date(self, df: pd.DataFrame, start_date: Union[str, pd.Timestamp, date],
-                            end_date: Union[str, pd.Timestamp, date]) -> pd.DataFrame:
+    from datetime import datetime, date
+    def filter_data_by_date(self, df: pd.DataFrame, start_date: Union[str, datetime, date],
+                            end_date: Union[str, datetime, date]) -> pd.DataFrame:
         """
         Filter a DataFrame to include only rows between start_date and end_date.
         """
