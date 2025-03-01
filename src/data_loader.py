@@ -392,6 +392,66 @@ def incremental_vpvr_fixed_bins(df: pd.DataFrame, width: int = 100,
     result_df = result_df.round(2)
     return result_df
 
+import cupy as cp
+
+def incremental_vpvr_fixed_bins_gpu(df: pd.DataFrame, width: int = 100,
+                                    n_rows: int = None, bins_array: cp.ndarray = None) -> pd.DataFrame:
+    """
+    GPU-accelerated incremental volume-by-price calculation using CuPy and cuDF.
+
+    Parameters:
+        df (pd.DataFrame): cuDF DataFrame with 'close' and 'volume' columns.
+        width (int): Number of bins.
+        n_rows (int, optional): Process only the first n_rows rows.
+        bins_array (cp.ndarray, optional): Custom bin edges on GPU.
+
+    Returns:
+        pd.DataFrame: cuDF DataFrame with cumulative volume distribution per row.
+    """
+    df = df.sort_index()
+    if n_rows is not None:
+        df = df.iloc[:n_rows]
+    closes = cp.asarray(df['close'].astype(float).values)  # Move to GPU
+    volumes = cp.asarray(df['volume'].astype(float).values)
+    n = len(df)
+    if n == 0:
+        return pd.DataFrame([], columns=[f"cluster_{c}" for c in range(width)])
+    if n == 1:
+        out = cp.zeros((1, width), dtype=cp.float64)
+        out[0, 0] = volumes[0]
+        return pd.DataFrame(out.get(), index=df.index[:1], columns=[f"cluster_{c}" for c in range(width)])
+
+    if bins_array is None:
+        min_price = cp.min(closes)
+        max_price = cp.max(closes)
+        if min_price == max_price:
+            out = cp.zeros((n, width), dtype=cp.float64)
+            out[0, 0] = volumes[0]
+            for i in range(1, n):
+                out[i] = out[i - 1]
+                out[i, 0] += volumes[i]
+            cluster_cols = [f"cluster_{c}" for c in range(width)]
+            return pd.DataFrame(out.get(), columns=cluster_cols, index=df.index)
+        bins_array = cp.linspace(min_price, max_price, width + 1)
+
+    width = len(bins_array) - 1
+    cumulative_dist = cp.zeros(width, dtype=cp.float64)
+    out = cp.zeros((n, width), dtype=cp.float64)
+
+    # GPU-accelerated loop
+    for i in range(n):
+        c_i = closes[i]
+        v_i = volumes[i]
+        bin_idx = cp.searchsorted(bins_array, c_i, side='right') - 1
+        bin_idx = cp.clip(bin_idx, 0, width - 1)  # Ensure index is within bounds
+        cumulative_dist[bin_idx] += v_i
+        out[i] = cumulative_dist
+
+    cluster_cols = [f"cluster_{c}" for c in range(width)]
+    result_df = pd.DataFrame(out.get(), columns=cluster_cols, index=df.index)  # Convert back to cuDF
+    result_df = result_df.round(2)
+    return result_df
+
 from datetime import datetime, date
 def filter_data_by_date(df: pd.DataFrame, start_date: Union[str, datetime, date],
                         end_date: Union[str, datetime, date]) -> pd.DataFrame:
@@ -550,18 +610,22 @@ class DataLoader:
             slow = int(params['slow'])
             signal = int(params['signal'])
             macd_df = macd(data['close'], fast=fast, slow=slow, signal=signal).astype(float)
+            macd_df.columns = [f'MACD_{fast}_{slow}_{signal}', 
+                            f'Signal_{fast}_{slow}_{signal}', 
+                            f'Histogram_{fast}_{slow}_{signal}']
             for col in macd_df.columns:
                 macd_df[col] = normalize_diff_vec(macd_df[col])
             result = macd_df.dropna()
-
         elif indicator_name == 'bbands':
             length = int(params['length'])
             std_dev = float(params['std_dev'])
             bbands_df = bbands(data['close'], length=length, std=std_dev).astype(float)
+            bbands_df.columns = [f'BB_Upper_{length}_{std_dev}', 
+                                f'BB_Middle_{length}_{std_dev}', 
+                                f'BB_Lower_{length}_{std_dev}']
             for col in bbands_df.columns:
                 bbands_df[col] = normalize_price_vec(bbands_df[col])
             result = bbands_df.dropna()
-
         elif indicator_name == 'atr':
             length = int(params['length'])
             data[f'ATR_{length}'] = atr(data['high'], data['low'], data['close'], length=length).astype(float)
@@ -572,6 +636,7 @@ class DataLoader:
             k = int(params['k'])
             d = int(params['d'])
             stoch_df = stoch(data['high'], data['low'], data['close'], k=k, d=d).astype(float)
+            stoch_df.columns = [f'Stoch_K_{k}_{d}', f'Stoch_D_{k}_{d}']
             result = stoch_df.dropna()
 
         elif indicator_name == 'cci':
@@ -609,28 +674,42 @@ class DataLoader:
         elif indicator_name == 'psar':
             acceleration = float(params['acceleration'])
             max_acceleration = float(params['max_acceleration'])
-            psar_df = psar(data['high'], data['low'], data['close'], acceleration=acceleration, max_acceleration=max_acceleration).astype(float)
+            psar_df = psar(data['high'], data['low'], data['close'], 
+                        acceleration=acceleration, max_acceleration=max_acceleration).astype(float)
+            psar_df.columns = [f'PSAR_{acceleration}_{max_acceleration}']
             data = data.join(psar_df)
-            result = data.dropna()
+            result = data[[f'PSAR_{acceleration}_{max_acceleration}']].dropna()
 
         elif indicator_name == 'ichimoku':
             tenkan = int(params['tenkan'])
             kijun = int(params['kijun'])
             senkou = int(params['senkou'])
-            ichimoku_df = ichimoku(data['high'], data['low'], data['close'], tenkan=tenkan, kijun=kijun, senkou=senkou)
-            data = data.join(ichimoku_df.astype(float))
-            result = data.dropna()
+            ichimoku_df = ichimoku(data['high'], data['low'], data['close'], 
+                                tenkan=tenkan, kijun=kijun, senkou=senkou).astype(float)
+            # Columns already named: 'tenkan', 'kijun', 'senkou_a', 'senkou_b'
+            ichimoku_df.columns = [f'Tenkan_{tenkan}', f'Kijun_{kijun}', 
+                                f'Senkou_A_{senkou}', f'Senkou_B_{senkou}']
+            data = data.join(ichimoku_df)
+            result = data[[f'Tenkan_{tenkan}', f'Kijun_{kijun}', 
+                        f'Senkou_A_{senkou}', f'Senkou_B_{senkou}']].dropna()
 
         elif indicator_name == 'keltner':
             length = int(params['length'])
             multiplier = float(params['multiplier'])
-            keltner_df = keltner(data['high'], data['low'], data['close'], length=length, multiplier=multiplier).astype(float)
+            keltner_df = keltner(data['high'], data['low'], data['close'], 
+                                length=length, multiplier=multiplier).astype(float)
+            keltner_df.columns = [f'Keltner_Upper_{length}_{multiplier}', 
+                                f'Keltner_Middle_{length}_{multiplier}', 
+                                f'Keltner_Lower_{length}_{multiplier}']
             result = keltner_df.dropna()
 
         elif indicator_name == 'donchian':
             lower_length = int(params['lower_length'])
             upper_length = int(params['upper_length'])
-            donchian_df = donchian(data['high'], data['low'], lower_length=lower_length, upper_length=upper_length).astype(float)
+            donchian_df = donchian(data['high'], data['low'], 
+                                lower_length=lower_length, upper_length=upper_length).astype(float)
+            donchian_df.columns = [f'Donchian_Upper_{upper_length}', 
+                                f'Donchian_Lower_{lower_length}']
             result = donchian_df.dropna()
 
         elif indicator_name == 'emv':
@@ -688,11 +767,13 @@ class DataLoader:
             width = int(params['width'])
             n_clusters = 100
             cluster_columns = [f'cluster_{i}' for i in range(n_clusters)]
-            # Fix: Use a dictionary to initialize clusters_df
-            data_dict = {col: np.zeros(len(data.index), dtype=np.float64) for col in cluster_columns}
-            clusters_df = pd.DataFrame(data_dict, index=data.index)
-            data = data.join(clusters_df)
-            volume_profile_df = incremental_vpvr_fixed_bins(data, width=n_clusters)
+            if USING_CUDF:
+                volume_profile_df = incremental_vpvr_fixed_bins_gpu(data, width=n_clusters)
+            else:
+                volume_profile_df = incremental_vpvr_fixed_bins(data, width=n_clusters)
+            for col in cluster_columns:
+                volume_profile_df[col] = normalize_volume_vec(volume_profile_df[col].values)
+            result = volume_profile_df[cluster_columns].dropna()
             new_clusters = volume_profile_df.copy()
             for col in cluster_columns:
                 new_clusters[col] = normalize_volume_vec(new_clusters[col].values)
