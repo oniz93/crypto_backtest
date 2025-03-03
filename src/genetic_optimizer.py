@@ -18,9 +18,7 @@ import hashlib
 import time
 
 import numpy as np
-import pandas as pd2
 import cudf
-import cupy as cp
 import dask
 # -----------------------------------------------------------------------------
 # CONDITIONAL DATAFRAME LIBRARY IMPORT:
@@ -49,13 +47,13 @@ import ray
 from multiprocessing import Pool
 from src.config_loader import Config
 from src.data_loader import DataLoader
-from dask.dataframe import DataFrame as DaskDataFrame
-import dask.dataframe as dd
-import dask_expr
+from dask.distributed import Client, as_completed
+from dask_cuda import LocalCUDACluster
 
 
 import warnings
 warnings.filterwarnings("ignore")
+dask.config.set({'distributed.worker.memory.spill': 0.7})
 
 # Set up logging for the GeneticOptimizer.
 logger = logging.getLogger('GeneticOptimizer')
@@ -240,8 +238,7 @@ class GeneticOptimizer:
                 features_df = pd.read_parquet(features_file)  # Always pandas for saved files
             else:
                 logger.info("Computing indicator features for individual (local mode)...")
-                indicators = self.load_indicators(config)
-                features_df = self.prepare_features(indicators)
+                features_df = self.load_and_prepare_features(config)
                 features_df.to_parquet(features_file)
         else:
             logger.info("Computing indicator features for individual...")
@@ -296,195 +293,150 @@ class GeneticOptimizer:
     
     @staticmethod
     def _calculate_indicator_worker(args):
-        """
-        Helper worker function to compute a single indicator on a given timeframe.
-        This function is intended to run in a separate process.
-        
-        Parameters:
-            args (tuple): Contains (data_loader, indicator_name, timeframe, params)
-            
-        Returns:
-            tuple: (indicator_name, timeframe, indicator_df)
-        """
         data_loader, indicator_name, timeframe, params = args
-        # Calculate the raw indicator using the DataLoader method.
-        # If GPUs are available, data_loader.tick_data (and therefore the indicator computation)
-        # will be using cuDF.
-
         action_start = time.time()
-        logger.info(f"Calculating {indicator_name} on TF {timeframe} with parameters {params}")
-        indicator_df = data_loader.calculate_indicator(indicator_name, params, timeframe)
-        logger.info(f"Calculation done {indicator_name} on TF {timeframe} with parameters {params} took {time.time() - action_start:.2f}s")
-        
-        import pandas as pd2  # Used for timedelta conversion
-        
+        logger.info(f"Starting calculation for {indicator_name} on TF {timeframe}")
+
+        try:
+            indicator_df = data_loader.calculate_indicator(indicator_name, params, timeframe)
+            indicator_df = indicator_df.add_suffix(f'_{indicator_name}_{timeframe}')
+            logger.info(f"Calculation done {indicator_name} on TF {timeframe} took {time.time() - action_start:.2f}s")
+
+            import pandas as pd2
+            if USING_CUDF and NUM_GPU > 1:
+                import dask_cudf
+                indicator_df = dask_cudf.from_cudf(indicator_df, npartitions=NUM_GPU)
+                if timeframe != data_loader.base_timeframe:
+                    shift_duration = pd2.to_timedelta(timeframe)
+                    indicator_df = indicator_df.map_partitions(
+                        lambda df: df.set_index(df.index - shift_duration)
+                    )
+                    indicator_df = indicator_df.map_partitions(
+                        lambda part: part.resample(data_loader.base_timeframe).first().ffill()
+                    )
+                    indicator_df = indicator_df.dropna()
+            else:
+                if timeframe != data_loader.base_timeframe:
+                    shift_duration = pd2.to_timedelta(timeframe)
+                    indicator_df_shifted = indicator_df.copy()
+                    indicator_df_shifted.index = indicator_df_shifted.index - shift_duration
+                    indicator_df = indicator_df_shifted.resample(data_loader.base_timeframe).ffill()
+                    indicator_df.dropna(inplace=True)
+            logger.info(f"Returning result for {indicator_name} on TF {timeframe}")
+            return (indicator_name, timeframe, indicator_df)
+        except Exception as e:
+            logger.error(f"Error in _calculate_indicator_worker for {indicator_name} on TF {timeframe}: {e}")
+            raise
+
+    def load_and_prepare_features(self, config):
+        """
+        Compute and merge technical indicators into a feature DataFrame in parallel.
+        Merges each indicator DataFrame as soon as it's computed, leveraging GPU acceleration with cuDF.
+
+        Parameters:
+            config (dict): Configuration containing indicator_params, num_processes, and simulation dates
+
+        Returns:
+            DataFrame: Final feature DataFrame (cuDF or pandas) with all indicators and additional features
+        """
+        # Extract configuration
+        indicator_params = config['indicator_params']
+        num_processes = config.get("num_processes", 5)
+
+        # Prepare tasks
+        tasks = [(self.data_loader, indicator_name, timeframe, params)
+                 for indicator_name, timeframes_params in indicator_params.items()
+                 for timeframe, params in timeframes_params.items()]
+
+        tasks = [
+            (self.data_loader, 'vwap', '1T', {'offset': 0}),
+            (self.data_loader, 'vwap', '5T', {'offset': 2}),
+            (self.data_loader, 'vwap', '15T', {'offset': 4}),
+            (self.data_loader, 'rsi', '1T', {'offset': 25}),
+            (self.data_loader, 'rsi', '5T', {'offset': 15}),
+            (self.data_loader, 'rsi', '15T', {'offset': 10}),
+        ]
+        # num_processes = 1
+
+        # Initialize features_df
         if USING_CUDF and NUM_GPU > 1:
             import dask_cudf
-            # Convert the cuDF DataFrame into a dask_cudf DataFrame to leverage multi-GPU processing.
-            indicator_df = dask_cudf.from_cudf(indicator_df, npartitions=NUM_GPU)
-            if timeframe != data_loader.base_timeframe:
-                shift_duration = pd2.to_timedelta(timeframe)
-                # Shift the index on each partition without bringing the data to CPU.
-                indicator_df = indicator_df.map_partitions(
-                    lambda df: df.set_index(df.index - shift_duration)
-                )
-                # Use dask_cudf's native resample which runs on the GPUs.
-                indicator_df = indicator_df.compute()
-                indicator_df = indicator_df.resample(data_loader.base_timeframe).ffill()
-                indicator_df = indicator_df.dropna()
+            self.features_df = dask_cudf.from_cudf(self.base_price_data, npartitions=NUM_GPU)
         else:
-            # Single GPU or CPU mode: use pandas resampling.
-            if timeframe != data_loader.base_timeframe:
-                shift_duration = pd2.to_timedelta(timeframe)
-                indicator_df_shifted = indicator_df.copy()
-                indicator_df_shifted.index = indicator_df_shifted.index - shift_duration
-                indicator_df_1min = indicator_df_shifted.resample(data_loader.base_timeframe).ffill()
-                indicator_df_1min.dropna(inplace=True)
-                indicator_df = indicator_df_1min
-        return (indicator_name, timeframe, indicator_df)
-    
-    
-    def load_indicators(self, config):
-        """
-        Compute technical indicator DataFrames in parallel based on the configuration.
-        Each indicator (for a given timeframe) is computed in a separate process.
-        
-        Returns:
-            dict: A nested dictionary with indicator names as keys and dictionaries 
-                  mapping each timeframe to its computed indicator DataFrame.
-        """
-        indicator_params = config['indicator_params']
-        tasks = []
-        indicators = {}
+            self.features_df = (self.base_price_data.copy() if isinstance(self.base_price_data, cudf.DataFrame)
+                                else cudf.from_pandas(self.base_price_data) if USING_CUDF
+            else self.base_price_data.copy())
 
-        # Create a list of tasks: one per indicator/timeframe combination.
-        for indicator_name, timeframes_params in indicator_params.items():
-            for timeframe, params in timeframes_params.items():
-                tasks.append((self.data_loader, indicator_name, timeframe, params))
-        
-        # Use the number of processes specified in config.
-        num_processes = config.get("num_processes", 5)
-        from multiprocessing import Pool
-        with Pool(processes=num_processes) as pool:
-            results = pool.map(GeneticOptimizer._calculate_indicator_worker, tasks)
-        
-        # Combine the results into a nested dictionary.
-        for indicator_name, timeframe, indicator_df in results:
-            if indicator_name not in indicators:
-                indicators[indicator_name] = {}
-            indicators[indicator_name][timeframe] = indicator_df
-        
-        return indicators
-    
-    def prepare_features(self, indicators):
-        """
-        Concatenate the base price data with all indicator DataFrames.
-        """
-        # Initialize features_df based on GPU mode
-        if USING_CUDF and NUM_GPU > 1:
-            # Multi-GPU: Convert to Dask-cuDF
-            features_df = dask_cudf.from_cudf(self.base_price_data, npartitions=NUM_GPU)
-        else:
-            # Single-GPU: Keep as cuDF
-            features_df = (self.base_price_data.copy() 
-                        if isinstance(self.base_price_data, cudf.DataFrame) 
-                        else cudf.from_pandas(self.base_price_data))
-        
-        logger.info(f"DataFrame type for features_df: {type(features_df)}")
+        logger.info(f"Initialized features_df as {type(self.features_df)}")
 
-        # Process each indicator
-        for indicator_name, tf_dict in indicators.items():
-            for timeframe, df in tf_dict.items():
-                action_start = time.time()
-                logger.info(f"Merging {indicator_name} on TF {timeframe}")
-                logger.info(f"DataFrame type for '{indicator_name}' '{timeframe}': {type(df)}")
+        # Set up Dask cluster
+        cluster = LocalCUDACluster(memory_limit='16GiB')
+        client = Client(cluster)
+        logger.info("Dask cluster initialized")
 
-                # Ensure df matches features_df type
+        # Submit tasks to Dask cluster
+        futures = [client.submit(self._calculate_indicator_worker, task) for task in tasks]
+
+        # Process results as they complete
+        for future in as_completed(futures):
+            try:
+                indicator_name, timeframe, indicator_df = future.result()
+                logger.info(f"Received result for {indicator_name} on TF {timeframe}")
                 if USING_CUDF and NUM_GPU > 1:
-                    if isinstance(df, (dask_cudf.DataFrame, dask_expr._collection.DataFrame)):
-                        logger.info(f"Not converting")
-                        # Already Dask-cuDF, no conversion needed
-                        pass
-                    elif isinstance(df, pd.DataFrame):  # cuDF DataFrame
-                        logger.info(f"Converting from pd.DataFrame")
-                        df = dask_cudf.from_cudf(df, npartitions=NUM_GPU)
-                    elif isinstance(df, pd2.DataFrame):  # pandas DataFrame
-                        logger.info(f"Converting from pd2.DataFrame")
-                        df = dask_cudf.from_cudf(pd.from_pandas(df), npartitions=NUM_GPU)
-                    elif isinstance(df, DaskDataFrame):  # Handle Dask DataFrame explicitly
-                        logger.info(f"Converting from DaskDataFrame")
-                        df = dask_cudf.from_cudf(df.compute(), npartitions=NUM_GPU)
-                    elif hasattr(df, 'to_cudf'):  # Handle dask_expr.DataFrame or similar
-                        logger.info(f"Converting from to_cudf")
-                        df = dask_cudf.from_cudf(df.compute(), npartitions=NUM_GPU)
+                    # Join Dask-cuDF DataFrames lazily
+                    self.features_df = self.features_df.join(indicator_df, how='inner')
                 else:
-                    logger.info(f"Apply compute?")
-                    # For local mode or single GPU, ensure it's a pandas or cuDF DataFrame
-                    if hasattr(df, 'compute'):  # Handle dask_expr.DataFrame or dask_cudf.DataFrame
-                        logger.info(f"Compute")
-                        df = df.compute()  # Convert to concrete DataFrame (pandas or cuDF)
-                    elif not isinstance(df, (pd.DataFrame, pd2.DataFrame)):
-                        raise TypeError(f"Unexpected DataFrame type for '{indicator_name}' '{timeframe}': {type(df)}")
-                # Clean column names
-                df.columns = [col.replace('\n', '').strip() for col in df.columns]
+                    # For single-GPU or pandas, convert to appropriate type if needed
+                    self.features_df = self.features_df.join(indicator_df, how='inner')
+            except Exception as e:
+                logger.error(f"Error processing result: {e}")
 
+        # Compute the final DataFrame if using Dask
+        if USING_CUDF and NUM_GPU > 1:
+            self.features_df = self.features_df.compute()
+            logger.info(f"Computed features_df to {type(self.features_df)}")
 
-                logger.info(f"DataFrame type after conversion for '{indicator_name}' '{timeframe}': {type(df)}")
-
-                # Resample or reindex as needed
-                if timeframe != self.data_loader.base_timeframe:
-                    shift_duration = pd2.to_timedelta(timeframe)
-                    df_shifted = df.copy()
-                    df_shifted.index = df_shifted.index - shift_duration
-                    if USING_CUDF and NUM_GPU > 1:
-                        # For Dask-cuDF (multi-GPU), use map_partitions to resample and ffill
-                        df = df_shifted.map_partitions(
-                            lambda part: part.resample(self.data_loader.base_timeframe).first().ffill()
-                        )
-                        logger.info(f"DataFrame type after repartition for '{indicator_name}' '{timeframe}': {type(df)}")
-                        df = dask_cudf.from_cudf(pd2.DataFrame(df.compute().to_numpy()), npartitions=NUM_GPU)
-                    else:
-                        # For cuDF or pandas (single-GPU or local), perform resample and ffill directly
-                        df = df_shifted.resample(self.data_loader.base_timeframe).first().ffill()
-                else:
-                    # Reindex to match features_df.index
-                    if USING_CUDF and NUM_GPU > 1:
-                        target_index = (features_df.index.compute() 
-                                    if isinstance(features_df.index, dask.array.Array) 
-                                    else features_df.index)
-                        logger.info(f"target_index type: {type(target_index)}")
-                        target_index = target_index.to_series()
-                        df = df.map_partitions(
-                            lambda part: part.reindex(index=target_index, method='ffill')
-                        )
-                    else:
-                        df = df.reindex(features_df.index, method='ffill')
-
-                logger.info(f"DataFrame type before join for '{indicator_name}' '{timeframe}': {type(df)}")
-                logger.info(f"features_df type before join: {type(df)}")
-                # Perform the join
-                features_df = features_df.join(df, how='inner')
-                logger.info(f"Merging {indicator_name} on TF {timeframe} took {time.time() - action_start:.2f}s")
-
-        # Compute RSI divergence (example logic, adjust as needed)
-        rsi_1min_first_col = indicators['rsi'][self.data_loader.base_timeframe].columns[0]
-        rsi_5min_first_col = indicators['rsi']['5T'].columns[0]
-        rsi_1min = features_df[f'{rsi_1min_first_col}_rsi_{self.data_loader.base_timeframe}']
-        rsi_5min = indicators['rsi']['5T'][rsi_5min_first_col].reindex(rsi_1min.index, method='ffill')
-        features_df['RSI_Divergence'] = rsi_1min - rsi_5min
+        # Compute RSI Divergence (example, adjust column names as needed)
+        # Assuming indicators append timeframe to column names, e.g., 'rsi_1min', 'rsi_5min'
+        try:
+            rsi_base_col = next(col for col in self.features_df.columns if
+                                'rsi' in col.lower() and self.data_loader.base_timeframe in col)
+            rsi_5min_col = next(col for col in self.features_df.columns if 'rsi' in col.lower() and '5T' in col)
+            self.features_df['RSI_Divergence'] = self.features_df[rsi_base_col] - self.features_df[rsi_5min_col]
+        except StopIteration:
+            logger.warning("RSI columns not found; skipping RSI_Divergence calculation")
 
         # Drop NaN values
-        features_df = features_df.dropna()
+        self.features_df = self.features_df.dropna()
 
         # Filter by date
-        filtered = self.data_loader.filter_data_by_date(
-            features_df,
-            self.config.get('start_simulation'),
-            self.config.get('end_simulation')
+        self.features_df = self.data_loader.filter_data_by_date(
+            self.features_df,
+            config.get('start_simulation'),
+            config.get('end_simulation')
         )
-        if USING_CUDF and NUM_GPU > 1:
-            filtered = filtered.compute()  # Compute final result for multi-GPU
-        return filtered
+
+        logger.info(f"Final features_df type: {type(self.features_df)}")
+        return self.features_df
+
+    def merge_indicator(self, result):
+        """
+        Callback function to merge an indicator DataFrame into features_df as soon as it's ready.
+
+        Parameters:
+            result (tuple): (indicator_name, timeframe, indicator_df)
+        """
+        indicator_name, timeframe, indicator_df = result
+        try:
+            logger.info(f"Received result for {indicator_name} on TF {timeframe}, columns: {indicator_df.columns}")
+            action_start = time.time()
+
+            indicator_df.columns = [col.replace('\n', '').strip() for col in indicator_df.columns]
+            self.features_df = self.features_df.join(indicator_df, how='inner')
+            logger.info(f"Merged {indicator_name} on TF {timeframe} in {time.time() - action_start:.2f}s")
+        except Exception as e:
+            logger.error(f"Error in merge_indicator for {indicator_name} on TF {timeframe}: {e}")
+            raise
 
     def create_environment(self, price_data, indicators):
         """
