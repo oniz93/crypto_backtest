@@ -15,6 +15,8 @@ import time
 import logging
 from numba import njit
 from datetime import date
+import sys
+import pandas as pd2
 
 # -----------------------------------------------------------------------------
 # CONDITIONAL DATAFRAME LIBRARY SELECTION:
@@ -25,15 +27,41 @@ try:
     import cupy as cp
     if cp.cuda.runtime.getDeviceCount() > 0:
         import cudf as pd
+        import dask_cudf  # Add dask_cudf import
         USING_CUDF = True
-        NUM_GPU = pd.cuda.get_device_count()
+        NUM_GPU = cp.cuda.runtime.getDeviceCount()  # Ensure consistency
     else:
         import pandas as pd
         USING_CUDF = False
         NUM_GPU = 0
 except Exception:
     import pandas as pd
-    USING_CUDF = False
+
+from src.config_loader import Config
+from src.utils import (normalize_price_vec, normalize_volume_vec,
+                       normalize_diff_vec, normalize_rsi_vec)
+
+# Set up module-level logging.
+logger = logging.getLogger(__name__)
+
+
+logger.setLevel(logging.DEBUG)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+pipe_path = '/tmp/genetic_optimizer_logpipe'
+if not os.path.exists(pipe_path):
+    os.mkfifo(pipe_path)
+try:
+    pipe = open(pipe_path, 'w')
+    pipe_handler = logging.StreamHandler(pipe)
+    pipe_handler.setLevel(logging.DEBUG)
+    pipe_handler.setFormatter(formatter)
+    logger.addHandler(pipe_handler)
+except Exception as e:
+    logger.error(f"Failed to open named pipe {pipe_path}: {e}")
 
 # -----------------------------------------------------------------------------
 # Remove pandas_ta import and define custom indicator functions.
@@ -72,6 +100,11 @@ def macd(series, fast, slow, signal):
     macd_line = ema_fast - ema_slow
     signal_line = ema(macd_line, signal)
     histogram = macd_line - signal_line
+    # Ensure all series are cuDF Series before concatenation (if using cuDF)
+    if USING_CUDF:
+        macd_line = pd.Series(macd_line)  # Explicitly convert to cuDF Series if needed. Redundant if ema returns cuDF series already.
+        signal_line = pd.Series(signal_line)
+        histogram = pd.Series(histogram)
     return pd.concat([macd_line, signal_line, histogram], axis=1)
 
 def bbands(series, length, std):
@@ -80,9 +113,14 @@ def bbands(series, length, std):
     Returns a DataFrame with columns: Upper Band, Middle SMA, Lower Band.
     """
     sma_val = sma(series, length)
-    rolling_std = series.rolling(window=length).std()
+    rolling_std = series.rolling(window=length).std()  # This should be cuDF's rolling std if 'series' is cuDF Series
     upper = sma_val + std * rolling_std
     lower = sma_val - std * rolling_std
+    # Ensure all series are cuDF Series before concatenation (if using cuDF)
+    if USING_CUDF:
+        upper = pd.Series(upper)  # Explicitly convert to cuDF Series if needed. Redundant if sma and rolling_std return cuDF series already.
+        sma_val = pd.Series(sma_val)
+        lower = pd.Series(lower)
     return pd.concat([upper, sma_val, lower], axis=1)
 
 def atr(high, low, close, length):
@@ -279,13 +317,6 @@ def hist_vol(close, length):
 # END OF CUSTOM INDICATOR FUNCTIONS
 # -----------------------------------------------------------------------------
 
-from src.config_loader import Config
-from src.utils import (normalize_price_vec, normalize_volume_vec,
-                       normalize_diff_vec, normalize_rsi_vec)
-
-# Set up module-level logging.
-logger = logging.getLogger(__name__)
-
 @njit
 def compute_cumulative_volume_profile_numba(close, volume, bins, width):
     """
@@ -465,7 +496,9 @@ def filter_data_by_date(df: pd.DataFrame, start_date: Union[str, datetime, date]
     Returns:
         pd.DataFrame: DataFrame containing only rows within the specified range.
     """
+
     start_date = start_date.isoformat()
+
     end_date = end_date.isoformat()
 
     start_date = pd.to_datetime(start_date)
@@ -513,14 +546,15 @@ class DataLoader:
         sorts the data, and filters it based on dates from the configuration.
         """
         tick_file = os.path.join(self.data_folder, 'BTCUSDT-tick-1min.parquet')
-        tick_data_1m = pd.read_parquet(tick_file)
+        tick_data_1m = pd2.read_parquet(tick_file)
         if 'timestamp' in tick_data_1m.columns:
-            tick_data_1m['timestamp'] = pd.to_datetime(tick_data_1m['timestamp'])
+            tick_data_1m['timestamp'] = pd2.to_datetime(tick_data_1m['timestamp'])
         else:
             raise ValueError("The 'timestamp' column is not present in the data.")
         tick_data_1m.set_index('timestamp', inplace=True)
         tick_data_1m.sort_index(inplace=True)
         tick_data_1m = filter_data_by_date(tick_data_1m, self.config.get('start_cutoff'), self.config.get('end_cutoff'))
+
         self.tick_data[self.base_timeframe] = tick_data_1m
 
     def resample_data(self):
@@ -581,10 +615,12 @@ class DataLoader:
         Returns:
             pd.DataFrame: DataFrame containing the computed indicator.
         """
+
         timing_enabled = self.config.get("timing", False)
         if timing_enabled:
             t_start = time.time()
         data = self.tick_data[timeframe].copy()
+        logger.info(f"Calculating indicator: {indicator_name}, Timeframe: {timeframe}, DataFrame Type: {type(data)}, Using cuDF: {USING_CUDF}")
 
         # Compute the indicator based on its name.
         if indicator_name == 'sma':
@@ -596,13 +632,18 @@ class DataLoader:
         elif indicator_name == 'ema':
             length = int(params['length'])
             data[f'EMA_{length}'] = ema(data['close'], length=length).astype(float)
+
             data[f'EMA_{length}'] = normalize_price_vec(data[f'EMA_{length}'])
+
             result = data[[f'EMA_{length}']].dropna()
 
         elif indicator_name == 'rsi':
             length = int(params['length'])
+            logger.info(f"RSI - Input type {type(data['close'])}")
             data[f'RSI_{length}'] = rsi(data['close'], length=length).astype(float)
+            logger.info(f"RSI - Output type {type(data[f'RSI_{length}'])}")
             data[f'RSI_{length}'] = normalize_rsi_vec(data[f'RSI_{length}'])
+            logger.info(f"RSI - Output type after normalization {type(data[f'RSI_{length}'])}")
             result = data[[f'RSI_{length}']].dropna()
 
         elif indicator_name == 'macd':
@@ -767,17 +808,38 @@ class DataLoader:
             width = int(params['width'])
             n_clusters = 100
             cluster_columns = [f'cluster_{i}' for i in range(n_clusters)]
+            data = self.tick_data[timeframe].copy()
+            if data['close'].isnull().any():
+                null_count = data['close'].isnull().sum()
+                logger.warning(
+                    f"Warning: 'close' column in {timeframe} timeframe contains {null_count} null values before VPVR calculation. Removing rows with nulls.")
+                data.dropna(subset=['close'], inplace=True)
+
             if USING_CUDF:
                 volume_profile_df = incremental_vpvr_fixed_bins_gpu(data, width=n_clusters)
             else:
                 volume_profile_df = incremental_vpvr_fixed_bins(data, width=n_clusters)
+
             for col in cluster_columns:
                 volume_profile_df[col] = normalize_volume_vec(volume_profile_df[col].values)
             result = volume_profile_df[cluster_columns].dropna()
             new_clusters = volume_profile_df.copy()
             for col in cluster_columns:
                 new_clusters[col] = normalize_volume_vec(new_clusters[col].values)
-            data = data.drop(columns=cluster_columns, errors='ignore').join(new_clusters)
+
+            # Debugging index types:
+            logger.info(f"Type of data.index before join: {type(data.index)}")
+            logger.info(f"Type of new_clusters.index before join: {type(new_clusters.index)}")
+
+            # Reset indices before join:
+            data = data.reset_index(drop=False)  # Keep the original index as a column 'timestamp'
+            new_clusters = new_clusters.reset_index(drop=False)
+
+            data = data.drop(columns=cluster_columns, errors='ignore').join(new_clusters, on='timestamp',
+                                                                            lsuffix='_left',
+                                                                            rsuffix='_right')  # Join on the 'timestamp' column
+            data = data.set_index('timestamp')  # Set 'timestamp' column back as index
+
             for col in cluster_columns:
                 data[col] = normalize_volume_vec(data[col])
             result = data[cluster_columns].dropna()

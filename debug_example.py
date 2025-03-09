@@ -10,17 +10,22 @@ from dask.distributed import Client
 import dask
 import warnings
 
+USING_CUDF = False
+NUM_GPU = 0
+
 try:
     import cupy as cp
     if cp.cuda.runtime.getDeviceCount() > 0:
         import cudf as pd
+        import dask_cudf  # Add dask_cudf import
         USING_CUDF = True
-        NUM_GPU = pd.cuda.get_device_count()
+        NUM_GPU = cp.cuda.runtime.getDeviceCount()  # Ensure consistency
     else:
+        import pandas as pd
         USING_CUDF = False
         NUM_GPU = 0
 except Exception:
-    USING_CUDF = False
+    import pandas as pd
 
 def debug_single():
     if USING_CUDF and NUM_GPU > 1:
@@ -28,11 +33,12 @@ def debug_single():
             n_workers=NUM_GPU,
             threads_per_worker=1,
             memory_limit="16GB",  # Adjust based on your GPU memory
-            CUDA_VISIBLE_DEVICES=",".join(str(i) for i in range(NUM_GPU))
+            CUDA_VISIBLE_DEVICES=",".join(str(i) for i in range(NUM_GPU)),
         )
         client = Client(cluster)
         dask.config.set({"dataframe.backend": "cudf"})
         print(f"Dask CUDA cluster initialized with {NUM_GPU} GPUs: {client}")
+        print(client.dashboard_link)
 
     data_loader = DataLoader()
     data_loader.import_ticks()
@@ -51,7 +57,7 @@ def debug_single():
         14, 14, 14, 14, 14, 14, 15,  # ATR length (7 timeframes)
         0.6, 0.6  # Model thresholds (buy, sell)
     ]
-    go = GeneticOptimizer(data_loader, session_id="debug123")
+    go = GeneticOptimizer(data_loader, session_id="debug123", cudfCluster=client)
     go.debug_single_individual(params)
 
     if USING_CUDF and NUM_GPU > 1:
