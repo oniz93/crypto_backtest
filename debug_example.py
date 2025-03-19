@@ -1,20 +1,16 @@
 # debug_example.py
 
-import argparse
-import random
 from src.data_loader import DataLoader
 from src.genetic_optimizer import GeneticOptimizer
-import multiprocessing as mp
 from dask_cuda import LocalCUDACluster
 from dask.distributed import Client
 import dask
-import warnings
+import cupy as cp
 
 USING_CUDF = False
 NUM_GPU = 0
 
 try:
-    import cupy as cp
     if cp.cuda.runtime.getDeviceCount() > 0:
         import cudf as pd
         import dask_cudf  # Add dask_cudf import
@@ -28,11 +24,15 @@ except Exception:
     import pandas as pd
 
 def debug_single():
+    client = None
     if USING_CUDF and NUM_GPU > 1:
         cluster = LocalCUDACluster(
             n_workers=NUM_GPU,
             threads_per_worker=1,
             memory_limit="16GB",  # Adjust based on your GPU memory
+            # rmm_pool_size=0.9,  # Use 90% of GPU memory as a pool for faster allocations
+            enable_cudf_spill=True,  # Improve device memory stability
+            local_directory="/tmp/",
             CUDA_VISIBLE_DEVICES=",".join(str(i) for i in range(NUM_GPU)),
         )
         client = Client(cluster)

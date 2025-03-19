@@ -8,6 +8,16 @@ including date conversion, unit conversion, rounding, and normalization.
 from datetime import datetime, timezone
 import numpy as np
 
+# Try to import cupy for GPU support
+try:
+    import cupy as cp
+    import cudf
+    HAS_CUPY = True
+except ImportError:
+    HAS_CUPY = False
+    cp = None
+    cudf = None
+
 def convert_date_to_time(date_str):
     """
     Convert a date string ('YYYY-MM-DD HH:MM:SS') to a datetime object.
@@ -170,51 +180,75 @@ def normalize_price_vec(prices, max_price=150000):
     Vectorized normalization for price values.
 
     Parameters:
-        prices (np.ndarray): Array of prices.
+        prices: Array of prices (NumPy or CuPy array, or Pandas/cuDF Series).
         max_price (float): Maximum price value.
 
     Returns:
-        np.ndarray: Normalized prices.
+        Array of normalized prices, same type as input.
     """
-    norm = 2 * (prices / max_price) - 1
-    return np.clip(norm, -1, 1)
+    # Check if this is a cuDF Series or DataFrame
+    if HAS_CUPY and hasattr(prices, 'to_cupy'):
+        # For cuDF Series/DataFrame (replace with native clip)
+        norm = 2 * (prices / max_price) - 1
+        norm = norm.clip(lower=-1, upper=1)
+        return norm
+    else:
+        # For numpy arrays or pandas Series
+        norm = 2 * (prices / max_price) - 1
+        return np.clip(norm, -1, 1)
 
 def normalize_volume_vec(volumes, max_volume=1000000):
     """
     Vectorized normalization for volume values.
 
     Parameters:
-        volumes (np.ndarray): Array of volumes.
+        volumes: Array of volumes (NumPy or CuPy array, or Pandas/cuDF Series).
         max_volume (float): Maximum volume.
 
     Returns:
-        np.ndarray: Normalized volumes.
+        Array of normalized volumes, same type as input.
     """
-    norm = 2 * (volumes / max_volume) - 1
-    return np.clip(norm, -1, 1)
+    # Check if this is a cuDF Series or DataFrame
+    if HAS_CUPY and hasattr(volumes, 'to_cupy'):
+        # For cuDF Series/DataFrame (replace with native clip)
+        norm = 2 * (volumes / max_volume) - 1
+        norm = norm.clip(lower=-1, upper=1)
+        return norm
+    else:
+        # For numpy arrays or pandas Series
+        norm = 2 * (volumes / max_volume) - 1
+        return np.clip(norm, -1, 1)
 
 def normalize_diff_vec(diffs, max_diff=150000):
     """
     Vectorized normalization for difference values.
 
     Parameters:
-        diffs (np.ndarray): Array of differences.
+        diffs: Array of differences (NumPy or CuPy array, or Pandas/cuDF Series).
         max_diff (float): Maximum absolute difference.
 
     Returns:
-        np.ndarray: Normalized differences.
+        Array of normalized differences, same type as input.
     """
-    norm = diffs / max_diff
-    return np.clip(norm, -1, 1)
+    # Check if this is a cuDF Series or DataFrame
+    if HAS_CUPY and hasattr(diffs, 'to_cupy'):
+        # For cuDF Series/DataFrame (replace with native clip)
+        norm = diffs / max_diff
+        norm = norm.clip(lower=-1, upper=1)
+        return norm
+    else:
+        # For numpy arrays or pandas Series
+        norm = diffs / max_diff
+        return np.clip(norm, -1, 1)
 
 def normalize_rsi_vec(rsis):
     """
     Vectorized normalization for RSI values.
 
     Parameters:
-        rsis (np.ndarray): Array of RSI values.
+        rsis: Array of RSI values (NumPy or CuPy array, or Pandas/cuDF Series).
 
     Returns:
-        np.ndarray: Normalized RSI values.
+        Array of normalized RSI values, same type as input.
     """
     return (rsis / 50) - 1

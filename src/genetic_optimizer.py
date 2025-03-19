@@ -1,11 +1,8 @@
 """
 genetic_optimizer.py
 --------------------
-This module implements a genetic algorithm (GA) optimizer for trading strategy parameters.
-It uses the DEAP library to evolve a population of individuals (parameter sets) and evaluates
-them by running reinforcement learning (RL) training on each individual.
-It also supports distributed evaluation using Ray or local multiprocessing.
-It now uses a conditional dataframe library (cuDF if CUDA is available, else pandas).
+This module implements a genetic algorithm optimizer for trading strategy parameters.
+It uses the DEAP library and supports distributed evaluation with Ray or multiprocessing.
 """
 
 import gc
@@ -18,45 +15,35 @@ import hashlib
 import time
 
 import numpy as np
-import cudf
-import dask
-
-import pandas as pd2
-# -----------------------------------------------------------------------------
-# CONDITIONAL DATAFRAME LIBRARY IMPORT:
-# Use cuDF when CUDA is available, otherwise fallback to pandas.
-# -----------------------------------------------------------------------------
-
-USING_CUDF = False
-NUM_GPU = 0
+import pandas as pd
 
 try:
+    import cudf
+    import dask_cudf
     import cupy as cp
-    if cp.cuda.runtime.getDeviceCount() > 0:
-        import cudf as pd
-        import dask_cudf  # Add dask_cudf import
-        USING_CUDF = True
-        NUM_GPU = cp.cuda.runtime.getDeviceCount()  # Ensure consistency
-    else:
-        import pandas as pd
-        USING_CUDF = False
-        NUM_GPU = 0
-except Exception:
-    import pandas as pd
+    NUM_GPU = cp.cuda.runtime.getDeviceCount()
+    USING_CUDF = NUM_GPU > 0
+except ImportError:
+    cudf = None
+    dask_cudf = None
+    cp = None
+    USING_CUDF = False
+    NUM_GPU = 0
 
+import dask
 from deap import base, creator, tools
 import ray
 from multiprocessing import Pool
 from src.config_loader import Config
 from src.data_loader import DataLoader
+from src.dataframe_strategy import get_dataframe_strategy
 from dask.distributed import Client, as_completed, get_worker
-
 
 import warnings
 warnings.filterwarnings("ignore")
 dask.config.set({'distributed.worker.memory.spill': 0.7})
 
-# Set up logging for the GeneticOptimizer.
+# Set up logging
 logger = logging.getLogger('GeneticOptimizer')
 logger.setLevel(logging.DEBUG)
 console_handler = logging.StreamHandler(sys.stdout)
@@ -99,6 +86,7 @@ class GeneticOptimizer:
         Initialize the GeneticOptimizer.
         """
         self.data_loader = data_loader
+        self.df_strategy = get_dataframe_strategy()
         self.indicators_dir = indicators_dir
         self.checkpoint_dir = checkpoint_dir
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -106,10 +94,7 @@ class GeneticOptimizer:
         self.session_id = session_id if session_id else "unknown-session"
         self.gen = gen
         self.indicators = self.define_indicators()
-        self.model_params = {
-            'threshold_buy': (0.5, 0.9),
-            'threshold_sell': (0.5, 0.9)
-        }
+        self.model_params = {'threshold_buy': (0.5, 0.9), 'threshold_sell': (0.5, 0.9)}
         self.cudfCluster = cudfCluster
         # Use the timeframes from the data loader to differentiate frequency strings.
         self.timeframes = self.data_loader.timeframes
@@ -171,7 +156,7 @@ class GeneticOptimizer:
                             parameter_indices[(indicator_name, param_name, tf)] = idx
                             idx += 1
                         except ValueError:
-                            raise ValueError(f"Indicator '{indicator_name}' timeframe '{tf}' param '{param_name}' has invalid limits: {limits}, expected (low, high)")
+                            raise ValueError(f"Indicator '{indicator_name}' timeframe '{tf}' param '{param_name}' has invalid limits: {limits}")
                 else:
                     # Non-timeframe-specific parameters (e.g., 'vwap', 'rsi')
                     for param_name, limits in data.items():
@@ -180,7 +165,7 @@ class GeneticOptimizer:
                             parameter_indices[(indicator_name, param_name, tf)] = idx
                             idx += 1
                         except ValueError:
-                            raise ValueError(f"Indicator '{indicator_name}' param '{param_name}' has invalid limits: {limits}, expected (low, high)")
+                            raise ValueError(f"Indicator '{indicator_name}' param '{param_name}' has invalid limits: {limits}")
         for param_name in self.model_params.keys():
             parameter_indices[('model', param_name)] = idx
             idx += 1
@@ -266,7 +251,7 @@ class GeneticOptimizer:
         del features_df
         env = self.create_environment(price_data, indicators_only)
         del indicators_only
-        logger.info("Starting RL training for individual using dataset-level chunking...")
+        logger.info("Starting RL training for individual...")
         agent, avg_profit = self.run_rl_training(env, episodes=self.config.get('episodes', 20))
         return (-avg_profit,), avg_profit, agent
 
@@ -292,29 +277,20 @@ class GeneticOptimizer:
         config['indicator_params'] = indicator_params
         config['model_params'] = model_params
         return config
-    
+
     @staticmethod
     def _calculate_indicator_worker(args):
         data_loader, indicator_name, timeframe, params = args
         action_start = time.time()
-        logger.info(f"_calculate_indicator_worker - Starting calculation for {indicator_name} on TF {timeframe} - Using cuDF: {USING_CUDF}") # Added Log
-
-        import cupy as cp
-        print(f"Worker using GPU: {cp.cuda.runtime.getDevice()}")
-
+        logger.info(f"_calculate_indicator_worker - Starting calculation for {indicator_name} on TF {timeframe} - Using cuDF: {USING_CUDF}")
         try:
             indicator_df = data_loader.calculate_indicator(indicator_name, params, timeframe)
-            logger.info(f"_calculate_indicator_worker - Indicator DataFrame type after calculation: {type(indicator_df)}") # Added Log
             indicator_df = indicator_df.add_suffix(f'_{indicator_name}_{timeframe}')
             logger.info(f"Calculation done {indicator_name} on TF {timeframe} took {time.time() - action_start:.2f}s")
-
-            import pandas as pd2
             if USING_CUDF and NUM_GPU > 1:
-                import dask_cudf
                 indicator_df = dask_cudf.from_cudf(indicator_df, npartitions=NUM_GPU)
-                logger.info(f"_calculate_indicator_worker - Indicator DataFrame type after dask_cudf.from_cudf: {type(indicator_df)}") # Added Log
                 if timeframe != data_loader.base_timeframe:
-                    shift_duration = pd2.to_timedelta(timeframe)
+                    shift_duration = pd.to_timedelta(timeframe)
                     indicator_df = indicator_df.map_partitions(
                         lambda df: df.set_index(df.index - shift_duration)
                     )
@@ -324,12 +300,11 @@ class GeneticOptimizer:
                     indicator_df = indicator_df.dropna()
             else:
                 if timeframe != data_loader.base_timeframe:
-                    shift_duration = pd2.to_timedelta(timeframe)
+                    shift_duration = pd.to_timedelta(timeframe)
                     indicator_df_shifted = indicator_df.copy()
                     indicator_df_shifted.index = indicator_df_shifted.index - shift_duration
                     indicator_df = indicator_df_shifted.resample(data_loader.base_timeframe).ffill()
                     indicator_df.dropna(inplace=True)
-            logger.info(f"_calculate_indicator_worker - Returning result for {indicator_name} on TF {timeframe}")
             return (indicator_name, timeframe, indicator_df)
         except Exception as e:
             logger.error(f"Error in _calculate_indicator_worker for {indicator_name} on TF {timeframe}: {e}")
@@ -357,7 +332,6 @@ class GeneticOptimizer:
 
         # Initialize features_df
         if USING_CUDF and NUM_GPU > 1:
-            import dask_cudf
             self.features_df = dask_cudf.from_cudf(self.base_price_data, npartitions=NUM_GPU)
         else:
             self.features_df = (self.base_price_data.copy() if isinstance(self.base_price_data, cudf.DataFrame)
@@ -366,29 +340,47 @@ class GeneticOptimizer:
 
         logger.info(f"Initialized features_df as {type(self.features_df)}")
 
+        # Only process a subset of tasks for debugging purposes
+        debug_limit = 3  # Only process the first few tasks
+        tasks = tasks[:debug_limit]
+        
         # Submit tasks to Dask cluster
+        logger.info(f"Only submitting {debug_limit} tasks for debugging purposes")
         futures = []
         for task in tasks:
-            future = self.cudfCluster.submit(self._calculate_indicator_worker, task)
-            futures.append(future)
-            logger.info(f"Submitted task for indicator: {task[1]}, TF: {task[2]}") # Added log
+            try:
+                future = self.cudfCluster.submit(self._calculate_indicator_worker, task)
+                futures.append(future)
+                logger.info(f"Submitted task for indicator: {task[1]}, TF: {task[2]}")
+            except Exception as e:
+                logger.error(f"Error submitting task: {e}")
 
         # Process results as they complete
         for future in as_completed(futures):
             try:
                 indicator_name, timeframe, indicator_df = future.result()
                 logger.info(f"Received result for {indicator_name} on TF {timeframe}")
+
+                indicator_df.columns = [col.replace('\n', '').strip() for col in indicator_df.columns]
                 if USING_CUDF and NUM_GPU > 1:
                     # Join Dask-cuDF DataFrames lazily
-                    self.features_df = self.features_df.join(indicator_df, how='inner')
+                    self.features_df = self.features_df.join(indicator_df, how='inner', on=["timestamp"])
                 else:
                     # For single-GPU or pandas, convert to appropriate type if needed
-                    self.features_df = self.features_df.join(indicator_df, how='inner')
+                    self.features_df = self.features_df.join(indicator_df, how='inner', on=["timestamp"])
             except Exception as e:
                 logger.error(f"Error processing result: {e}")
 
         # Compute the final DataFrame if using Dask
         if USING_CUDF and NUM_GPU > 1:
+            shift_duration = pd.to_timedelta(self.data_loader.base_timeframe)
+            # Shift the index on each partition without bringing the data to CPU.
+            # self.features_df = self.features_df.map_partitions(
+            #     lambda df: df.set_index(df.index - shift_duration)
+            # )
+            self.features_df = self.features_df.map_partitions(
+                lambda part: part.resample(self.data_loader.base_timeframe).first().ffill()
+            )
             self.features_df = self.features_df.compute()
             logger.info(f"Computed features_df to {type(self.features_df)} - Time: {time.time()-time_start:.2f}s")
 
@@ -405,35 +397,16 @@ class GeneticOptimizer:
         # Drop NaN values
         self.features_df = self.features_df.dropna()
 
-        # Filter by date
-        self.features_df = self.data_loader.filter_data_by_date(
-            self.features_df,
-            self.config.get('start_simulation'),
-            self.config.get('end_simulation')
-        )
-
-        logger.info(f"Final features_df type: {type(self.features_df)}")
+        # Exit early for debugging - even before processing all indicators
+        logger.info("Exiting early for debugging")
         exit()
+        
+        # Filter by date (not reached due to exit)
+        self.features_df = self.data_loader.filter_data_by_date(
+            self.features_df, self.config.get('start_simulation'), self.config.get('end_simulation')
+        )
+        logger.info(f"Final features_df type: {type(self.features_df)}")
         return self.features_df
-
-    def merge_indicator(self, result):
-        """
-        Callback function to merge an indicator DataFrame into features_df as soon as it's ready.
-
-        Parameters:
-            result (tuple): (indicator_name, timeframe, indicator_df)
-        """
-        indicator_name, timeframe, indicator_df = result
-        try:
-            logger.info(f"Received result for {indicator_name} on TF {timeframe}, columns: {indicator_df.columns}")
-            action_start = time.time()
-
-            indicator_df.columns = [col.replace('\n', '').strip() for col in indicator_df.columns]
-            self.features_df = self.features_df.join(indicator_df, how='inner')
-            logger.info(f"Merged {indicator_name} on TF {timeframe} in {time.time() - action_start:.2f}s")
-        except Exception as e:
-            logger.error(f"Error in merge_indicator for {indicator_name} on TF {timeframe}: {e}")
-            raise
 
     def create_environment(self, price_data, indicators):
         """
@@ -444,15 +417,13 @@ class GeneticOptimizer:
         transaction_cost = 0.005
         mode = self.config.get('training_mode')
         return TradingEnvironment(price_data, indicators, initial_capital=initial_capital,
-                                  transaction_cost=transaction_cost, mode=mode)
+                                 transaction_cost=transaction_cost, mode=mode)
 
     def run_rl_training(self, env, episodes=1):
         """
         Run reinforcement learning training on the trading environment using dataset-level chunking.
         """
         from src.rl_agent import DQNAgent
-        import gc
-        import time
         seq_length = self.config.get('seq_length', 720)
         chunk_size = self.config.get('chunk_size', 4000)
         batch_frequency = 32
@@ -511,10 +482,10 @@ class GeneticOptimizer:
                     if step_count % 1000 == 0:
                         logger.debug(f"Step {step_count}: Action time={action_time:.3f}s")
                 if step_count < chunk_len:
-                    penalty_factory = (chunk_len - step_count) / chunk_len
-                    chunk_reward *= (1 + penalty_factory)
+                    penalty_factor = (chunk_len - step_count) / chunk_len
+                    chunk_reward *= (1 + penalty_factor)
                 ep_reward += chunk_reward
-                logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.2f} (last step: {info.get('n_step', 0)})")
+                logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.2f}")
                 logger.info(f"Chunk {i + 1} took {time.time() - chunk_start_time:.2f}s")
                 logger.info(f"Num profit sell {profit_sells} -> {profit_total:.2f}")
                 logger.info(f"Num loss sell {loss_sells} -> {loss_total:.2f}")
@@ -529,9 +500,6 @@ class GeneticOptimizer:
         return agent, avg_reward
 
     def evaluate_individuals(self, individuals):
-        """
-        Evaluate a list of individuals using Ray or local multiprocessing.
-        """
         processing = self.config.get("processing", "ray").lower()
         if processing == "ray":
             if not ray.is_initialized():
