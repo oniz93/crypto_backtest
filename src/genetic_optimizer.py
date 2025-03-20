@@ -19,29 +19,26 @@ import pandas as pd
 
 try:
     import cudf
-    import dask_cudf
     import cupy as cp
+    import numba.cuda as cuda
     NUM_GPU = cp.cuda.runtime.getDeviceCount()
     USING_CUDF = NUM_GPU > 0
-except ImportError:
+except:
     cudf = None
-    dask_cudf = None
     cp = None
+    cuda = None
     USING_CUDF = False
     NUM_GPU = 0
 
-import dask
 from deap import base, creator, tools
 import ray
 from multiprocessing import Pool
 from src.config_loader import Config
 from src.data_loader import DataLoader
 from src.dataframe_strategy import get_dataframe_strategy
-from dask.distributed import Client, as_completed, get_worker
 
 import warnings
 warnings.filterwarnings("ignore")
-dask.config.set({'distributed.worker.memory.spill': 0.7})
 
 # Set up logging
 logger = logging.getLogger('GeneticOptimizer')
@@ -80,8 +77,7 @@ def local_evaluate_individual(args):
 class GeneticOptimizer:
     def __init__(self, data_loader: DataLoader, session_id=None, gen=None,
                  indicators_dir='precalculated_indicators_parquet',
-                 checkpoint_dir='checkpoints', checkpoint_file=None,
-                 cudfCluster=None):
+                 checkpoint_dir='checkpoints', checkpoint_file=None):
         """
         Initialize the GeneticOptimizer.
         """
@@ -95,7 +91,6 @@ class GeneticOptimizer:
         self.gen = gen
         self.indicators = self.define_indicators()
         self.model_params = {'threshold_buy': (0.5, 0.9), 'threshold_sell': (0.5, 0.9)}
-        self.cudfCluster = cudfCluster
         # Use the timeframes from the data loader to differentiate frequency strings.
         self.timeframes = self.data_loader.timeframes
         self.parameter_indices = self.create_parameter_indices()
@@ -212,18 +207,20 @@ class GeneticOptimizer:
             ind.append(val)
         return icls(ind)
 
-    def evaluate_individual(self, individual, useLocal=False):
+    def evaluate_individual(self, individual, useLocal=False, gpuId=None):
         """
         Evaluate an individual by computing indicator features, filtering data,
         and running RL training.
         """
+        if gpuId != None:
+            cuda.select_device(gpuId)
         config = self.extract_config_from_individual(individual)
         if useLocal:
             hash_str = hashlib.md5(str(individual).encode()).hexdigest()
             features_file = f"features/{hash_str}.parquet"
             if os.path.exists(features_file):
                 logger.info("Loading precomputed indicator features from file...")
-                features_df = pd.read_parquet(features_file)  # Always pandas for saved files
+                features_df = self.df_strategy.load_parquet(features_file)  # Always pandas for saved files
             else:
                 logger.info("Computing indicator features for individual (local mode)...")
                 features_df = self.load_and_prepare_features(config)
@@ -287,24 +284,12 @@ class GeneticOptimizer:
             indicator_df = data_loader.calculate_indicator(indicator_name, params, timeframe)
             indicator_df = indicator_df.add_suffix(f'_{indicator_name}_{timeframe}')
             logger.info(f"Calculation done {indicator_name} on TF {timeframe} took {time.time() - action_start:.2f}s")
-            if USING_CUDF and NUM_GPU > 1:
-                indicator_df = dask_cudf.from_cudf(indicator_df, npartitions=NUM_GPU)
-                if timeframe != data_loader.base_timeframe:
-                    shift_duration = pd.to_timedelta(timeframe)
-                    indicator_df = indicator_df.map_partitions(
-                        lambda df: df.set_index(df.index - shift_duration)
-                    )
-                    indicator_df = indicator_df.map_partitions(
-                        lambda part: part.resample(data_loader.base_timeframe).first().ffill()
-                    )
-                    indicator_df = indicator_df.dropna()
-            else:
-                if timeframe != data_loader.base_timeframe:
-                    shift_duration = pd.to_timedelta(timeframe)
-                    indicator_df_shifted = indicator_df.copy()
-                    indicator_df_shifted.index = indicator_df_shifted.index - shift_duration
-                    indicator_df = indicator_df_shifted.resample(data_loader.base_timeframe).ffill()
-                    indicator_df.dropna(inplace=True)
+            if timeframe != data_loader.base_timeframe:
+                shift_duration = pd.to_timedelta(timeframe)
+                indicator_df_shifted = indicator_df.copy()
+                indicator_df_shifted.index = indicator_df_shifted.index - shift_duration
+                indicator_df = indicator_df_shifted.resample(data_loader.base_timeframe).ffill()
+                indicator_df.dropna(inplace=True)
             return (indicator_name, timeframe, indicator_df)
         except Exception as e:
             logger.error(f"Error in _calculate_indicator_worker for {indicator_name} on TF {timeframe}: {e}")
@@ -323,7 +308,6 @@ class GeneticOptimizer:
         """
         # Extract configuration
         indicator_params = config['indicator_params']
-        time_start = time.time()
 
         # Prepare tasks
         tasks = [(self.data_loader, indicator_name, timeframe, params)
@@ -331,58 +315,18 @@ class GeneticOptimizer:
                  for timeframe, params in timeframes_params.items()]
 
         # Initialize features_df
-        if USING_CUDF and NUM_GPU > 1:
-            self.features_df = dask_cudf.from_cudf(self.base_price_data, npartitions=NUM_GPU)
-        else:
-            self.features_df = (self.base_price_data.copy() if isinstance(self.base_price_data, cudf.DataFrame)
+        self.features_df = (self.base_price_data.copy() if isinstance(self.base_price_data, cudf.DataFrame)
                                 else cudf.from_pandas(self.base_price_data) if USING_CUDF
             else self.base_price_data.copy())
 
         logger.info(f"Initialized features_df as {type(self.features_df)}")
 
-        # Only process a subset of tasks for debugging purposes
-        debug_limit = 3  # Only process the first few tasks
-        tasks = tasks[:debug_limit]
-        
-        # Submit tasks to Dask cluster
-        logger.info(f"Only submitting {debug_limit} tasks for debugging purposes")
-        futures = []
         for task in tasks:
-            try:
-                future = self.cudfCluster.submit(self._calculate_indicator_worker, task)
-                futures.append(future)
-                logger.info(f"Submitted task for indicator: {task[1]}, TF: {task[2]}")
-            except Exception as e:
-                logger.error(f"Error submitting task: {e}")
-
-        # Process results as they complete
-        for future in as_completed(futures):
-            try:
-                indicator_name, timeframe, indicator_df = future.result()
+                indicator_name, timeframe, indicator_df = self._calculate_indicator_worker(task)
                 logger.info(f"Received result for {indicator_name} on TF {timeframe}")
 
                 indicator_df.columns = [col.replace('\n', '').strip() for col in indicator_df.columns]
-                if USING_CUDF and NUM_GPU > 1:
-                    # Join Dask-cuDF DataFrames lazily
-                    self.features_df = self.features_df.join(indicator_df, how='inner', on=["timestamp"])
-                else:
-                    # For single-GPU or pandas, convert to appropriate type if needed
-                    self.features_df = self.features_df.join(indicator_df, how='inner', on=["timestamp"])
-            except Exception as e:
-                logger.error(f"Error processing result: {e}")
-
-        # Compute the final DataFrame if using Dask
-        if USING_CUDF and NUM_GPU > 1:
-            shift_duration = pd.to_timedelta(self.data_loader.base_timeframe)
-            # Shift the index on each partition without bringing the data to CPU.
-            # self.features_df = self.features_df.map_partitions(
-            #     lambda df: df.set_index(df.index - shift_duration)
-            # )
-            self.features_df = self.features_df.map_partitions(
-                lambda part: part.resample(self.data_loader.base_timeframe).first().ffill()
-            )
-            self.features_df = self.features_df.compute()
-            logger.info(f"Computed features_df to {type(self.features_df)} - Time: {time.time()-time_start:.2f}s")
+                self.features_df = self.features_df.join(indicator_df)
 
         # Compute RSI Divergence (example, adjust column names as needed)
         # Assuming indicators append timeframe to column names, e.g., 'rsi_1min', 'rsi_5min'
@@ -649,7 +593,7 @@ class GeneticOptimizer:
         ind = creator.Individual(individual_params)
         logger.info("=== Debugging single individual ===")
         logger.info(f"=== Use of GPU {USING_CUDF} - Number GPUs: {NUM_GPU} ===")
-        fit, avg_profit, agent = self.evaluate_individual(ind, useLocal=True)
+        fit, avg_profit, agent = self.evaluate_individual(ind, useLocal=True, gpuId=1)
         logger.info(f"Evaluation finished. Fit: {fit}, Profit: {avg_profit}")
         if agent is not None:
             logger.info("An RL agent was created; you can place breakpoints inside run_rl_training or environment.")

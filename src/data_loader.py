@@ -18,6 +18,18 @@ import pandas as pd
 from src.config_loader import Config
 from src.dataframe_strategy import get_dataframe_strategy
 
+try:
+    import cudf
+    import cupy as cp
+    import numba.cuda as cuda
+    NUM_GPU = cp.cuda.runtime.getDeviceCount()
+    USING_CUDF = NUM_GPU > 0
+except:
+    cp = None
+    cuda = None
+    USING_CUDF = False
+    NUM_GPU = 0
+
 # Set up module-level logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -57,24 +69,8 @@ class DataLoader:
         sorts the data, and filters it based on dates from the configuration.
         """
         tick_file = os.path.join(self.data_folder, 'BTCUSDT-tick-1min.parquet')
-        tick_data_1m = self.df_strategy.load_parquet(tick_file)
-        if 'timestamp' in tick_data_1m.columns:
-            # Handle timestamp conversion based on the dataframe type
-            try:
-                import cudf
-                if isinstance(tick_data_1m, cudf.DataFrame):
-                    # cuDF has built-in datetime conversion when reading from parquet
-                    pass
-                else:
-                    # Use pandas for non-cuDF dataframes
-                    import pandas as pd_lib
-                    tick_data_1m['timestamp'] = pd_lib.to_datetime(tick_data_1m['timestamp'])
-            except ImportError:
-                # Fall back to pandas if cuDF isn't available
-                import pandas as pd_lib
-                tick_data_1m['timestamp'] = pd_lib.to_datetime(tick_data_1m['timestamp'])
-        else:
-            raise ValueError("The 'timestamp' column is not present in the data.")
+        tick_data_1m = pd.read_parquet(tick_file)
+        tick_data_1m['timestamp'] = pd.to_datetime(tick_data_1m['timestamp'])
         tick_data_1m.set_index('timestamp', inplace=True)
         tick_data_1m.sort_index(inplace=True)
         tick_data_1m = self.filter_data_by_date(tick_data_1m, self.config.get('start_cutoff'), self.config.get('end_cutoff'))
@@ -112,7 +108,10 @@ class DataLoader:
         """Calculate a technical indicator using the strategy."""
         timing_enabled = self.config.get("timing", False)
         t_start = time.time() if timing_enabled else None
-        data = self.tick_data[timeframe].copy()
+        if USING_CUDF:
+            data = cudf.from_pandas(self.tick_data[timeframe])
+        else:
+            data = self.tick_data[timeframe].copy()
         logger.info(f"Calculating indicator: {indicator_name}, Timeframe: {timeframe}, DataFrame Type: {type(data)}")
         result = self.df_strategy.calculate_indicator(indicator_name, data, params, timeframe)
         if timing_enabled:

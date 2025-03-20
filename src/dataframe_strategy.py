@@ -150,34 +150,75 @@ def incremental_vpvr_fixed_bins(df: pd.DataFrame,
     return result_df
 
 
-def incremental_vpvr_fixed_bins_gpu(df: 'cudf.DataFrame',
-                                    width: int = 100) -> 'cudf.DataFrame':
+def incremental_vpvr_fixed_bins_gpu(df: cudf.DataFrame,
+                                     width: int = 100,
+                                     n_rows: int = None,
+                                     bins_array: np.ndarray = None) -> cudf.DataFrame:
     """
-    GPU-accelerated incremental volume-by-price calculation using CuPy and cuDF.
-    Optimized version for debugging - returns a simple dataframe with minimal computation.
+    A one-pass algorithm to compute incremental volume-by-price for cuDF data.
 
     Parameters:
-        df (cudf.DataFrame): DataFrame with 'close' and 'volume' columns (cuDF).
-        width (int): Number of bins.
-        n_rows (int, optional): Only process the first n_rows if given.
-        bins_array (cp.ndarray, optional): Custom bin edges on GPU.
+        df (cudf.DataFrame): DataFrame with 'close' and 'volume' columns.
+        width (int): Number of bins (default is 100).
+        n_rows (int, optional): Number of rows to process; if None, process all rows.
+        bins_array (np.ndarray, optional): Custom bin edges; if None, bins are auto-generated.
 
     Returns:
-        cudf.DataFrame: With cumulative volume distribution per row.
+        cudf.DataFrame: Cumulative volume distribution per row, with columns 'cluster_0' to 'cluster_{width-1}'.
     """
-    # Just return a simple dataframe for debugging
-    n = min(len(df), 1000)  # Limit size for debug
-    sample_idx = df.index[:n]
-    
-    # Create a simple result with zeros
-    width = min(width, 20)  # Limit width for debug
-    out = cp.ones((n, width), dtype=cp.float64)  # All ones for simplicity
-    
-    # Create column names
-    cluster_cols = [f"cluster_{c}" for c in range(width)]
-    
-    # Return a simple dataframe
-    return cudf.DataFrame(out.get(), columns=cluster_cols, index=sample_idx)
+    # Sort the DataFrame by index
+    df = df.sort_index()
+
+    # Slice the DataFrame if n_rows is specified
+    if n_rows is not None:
+        df = df.iloc[:n_rows]
+
+    n = len(df)
+    # Handle empty DataFrame case
+    if n == 0:
+        return cudf.DataFrame([], columns=[f"cluster_{c}" for c in range(width)])
+
+    # Extract 'close' and 'volume' as float64 Series
+    closes = df['close'].astype('float64')
+    volumes = df['volume'].astype('float64')
+
+    # Determine bin edges and indices
+    if bins_array is None:
+        min_price = closes.min()
+        max_price = closes.max()
+        if min_price == max_price:
+            # All volumes go to the first bin if prices are identical
+            bin_indices = cp.zeros(n, dtype=cp.int64)
+        else:
+            # Create bins based on min and max prices
+            bins_array = np.linspace(min_price, max_price, width + 1)
+            bins_series = cudf.Series(bins_array)
+            bin_indices = (bins_series.searchsorted(closes, side='right') - 1).clip(0, width - 1)
+    else:
+        # Use provided bins_array and adjust width
+        width = len(bins_array) - 1
+        bins_series = cudf.Series(bins_array)
+        bin_indices = (bins_series.searchsorted(closes, side='right') - 1).clip(0, width - 1)
+
+    # Initialize output array and populate with volumes
+    out = cp.zeros((n, width), dtype=cp.float64)
+    rows = cp.arange(n)
+    out[rows, bin_indices] = volumes.values
+
+    # Compute cumulative sum along rows
+    cumulative_dist = cp.cumsum(out, axis=0)
+
+    # Create result DataFrame with original index and cluster column names
+    result_df = cudf.DataFrame(
+        cumulative_dist,
+        index=df.index,
+        columns=[f"cluster_{c}" for c in range(width)]
+    )
+
+    # Round to 2 decimal places
+    result_df = result_df.round(2)
+
+    return result_df
 
 
 # -------------- Abstract & Base Classes --------------
@@ -387,7 +428,11 @@ class BaseStrategy(DataFrameStrategy):
         tr1 = high - low
         tr2 = (high - close.shift()).abs()
         tr3 = (low - close.shift()).abs()
-        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        if hasattr(data, 'to_pandas'):
+            true_range = cudf.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        else:
+            true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
         atr_series = true_range.rolling(window=length).mean().astype(float)
         atr_series = normalize_diff_vec(atr_series)
@@ -406,8 +451,10 @@ class BaseStrategy(DataFrameStrategy):
         highest_high = high.rolling(window=k).max()
         stoch_k = 100 * (close - lowest_low) / (highest_high - lowest_low)
         stoch_d = stoch_k.rolling(window=d).mean()
-        df = pd.concat([stoch_k, stoch_d], axis=1, keys=[
-            f'Stoch_K_{k}_{d}', f'Stoch_D_{k}_{d}']).astype(float)
+        df = cudf.DataFrame({
+            f'Stoch_K_{k}_{d}': stoch_k,
+            f'Stoch_D_{k}_{d}': stoch_d,
+        }, index=data.index)
         return df.dropna()
 
     def _calculate_cci(self, data, params):
@@ -439,11 +486,19 @@ class BaseStrategy(DataFrameStrategy):
         down_move = low.diff().abs()
         plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
         minus_dm = (-low.diff()).where(((-low.diff()) > up_move) & ((-low.diff()) > 0), 0)
-        tr = pd.concat([
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs()
-        ], axis=1).max(axis=1)
+
+        if hasattr(data, 'to_pandas'):
+            tr = cudf.concat([
+                high - low,
+                (high - close.shift()).abs(),
+                (low - close.shift()).abs()
+            ], axis=1).max(axis=1)
+        else:
+            tr = pd.concat([
+                high - low,
+                (high - close.shift()).abs(),
+                (low - close.shift()).abs()
+            ], axis=1).max(axis=1)
 
         atr_val = tr.rolling(window=length).mean()
         plus_di = 100 * (plus_dm.rolling(window=length).sum() / atr_val)
@@ -572,10 +627,16 @@ class BaseStrategy(DataFrameStrategy):
         senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(kijun)
         senkou_span_b = ((high.rolling(window=senkou).max() + low.rolling(window=senkou).min()) / 2).shift(kijun)
 
-        ichimoku_df = pd.concat(
-            [tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b],
-            axis=1
-        ).astype(float)
+        if hasattr(data, 'to_pandas'):
+            ichimoku_df = cudf.concat(
+                [tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b],
+                axis=1
+            ).astype(float)
+        else:
+            ichimoku_df = pd.concat(
+                [tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b],
+                axis=1
+            ).astype(float)
         ichimoku_df.columns = [
             f'Tenkan_{tenkan}',
             f'Kijun_{kijun}',
@@ -597,13 +658,21 @@ class BaseStrategy(DataFrameStrategy):
         tr1 = high - low
         tr2 = (high - close.shift()).abs()
         tr3 = (low - close.shift()).abs()
-        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        if hasattr(data, 'to_pandas'):
+            true_range = cudf.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        else:
+            true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr_val = true_range.rolling(window=length).mean()
 
         upper = ema_tp + multiplier * atr_val
         middle = ema_tp
         lower = ema_tp - multiplier * atr_val
-        keltner_df = pd.concat([upper, middle, lower], axis=1).astype(float)
+
+        if hasattr(data, 'to_pandas'):
+            keltner_df = cudf.concat([upper, middle, lower], axis=1).astype(float)
+        else:
+            keltner_df = pd.concat([upper, middle, lower], axis=1).astype(float)
         keltner_df.columns = [
             f'Keltner_Upper_{length}_{multiplier}',
             f'Keltner_Middle_{length}_{multiplier}',
@@ -618,7 +687,11 @@ class BaseStrategy(DataFrameStrategy):
         low = data['low']
         upper = high.rolling(window=upper_length).max()
         lower = low.rolling(window=lower_length).min()
-        donchian_df = pd.concat([upper, lower], axis=1).astype(float)
+
+        if hasattr(data, 'to_pandas'):
+            donchian_df = cudf.concat([upper, lower], axis=1).astype(float)
+        else:
+            donchian_df = pd.concat([upper, lower], axis=1).astype(float)
         donchian_df.columns = [
             f'Donchian_Upper_{upper_length}',
             f'Donchian_Lower_{lower_length}'
@@ -655,12 +728,20 @@ class BaseStrategy(DataFrameStrategy):
         low = data['low']
         close = data['close']
 
-        bp = close - pd.concat([low, close.shift(1)], axis=1).min(axis=1)
-        tr = pd.concat([
-            high - low,
-            (high - close.shift(1)).abs(),
-            (low - close.shift(1)).abs()
-        ], axis=1).max(axis=1)
+        if hasattr(data, 'to_pandas'):
+            bp = close - cudf.concat([low, close.shift(1)], axis=1).min(axis=1)
+            tr = cudf.concat([
+                high - low,
+                (high - close.shift(1)).abs(),
+                (low - close.shift(1)).abs()
+            ], axis=1).max(axis=1)
+        else:
+            bp = close - pd.concat([low, close.shift(1)], axis=1).min(axis=1)
+            tr = pd.concat([
+                high - low,
+                (high - close.shift(1)).abs(),
+                (low - close.shift(1)).abs()
+            ], axis=1).max(axis=1)
 
         avg_short = bp.rolling(window=short).sum() / tr.rolling(window=short).sum()
         avg_medium = bp.rolling(window=medium).sum() / tr.rolling(window=medium).sum()
@@ -937,6 +1018,7 @@ class CuDFStrategy(BaseStrategy):
         data = data.reset_index(drop=False)
         new_clusters = volume_profile_df.reset_index(drop=False)
 
+        # Change this line:
         data = data.drop(columns=cluster_columns, errors='ignore').merge(
             new_clusters, on='timestamp', suffixes=('_left', '_right')
         )

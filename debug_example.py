@@ -2,44 +2,21 @@
 
 from src.data_loader import DataLoader
 from src.genetic_optimizer import GeneticOptimizer
-from dask_cuda import LocalCUDACluster
-from dask.distributed import Client
-import dask
-import cupy as cp
-
-USING_CUDF = False
-NUM_GPU = 0
 
 try:
-    if cp.cuda.runtime.getDeviceCount() > 0:
-        import cudf as pd
-        import dask_cudf  # Add dask_cudf import
-        USING_CUDF = True
-        NUM_GPU = cp.cuda.runtime.getDeviceCount()  # Ensure consistency
-    else:
-        import pandas as pd
-        USING_CUDF = False
-        NUM_GPU = 0
-except Exception:
-    import pandas as pd
+    import cudf
+    import cupy as cp
+    import numba.cuda as cuda
+    NUM_GPU = cp.cuda.runtime.getDeviceCount()
+    USING_CUDF = NUM_GPU > 0
+except:
+    cudf = None
+    cp = None
+    cuda = None
+    USING_CUDF = False
+    NUM_GPU = 0
 
 def debug_single():
-    client = None
-    if USING_CUDF and NUM_GPU > 1:
-        cluster = LocalCUDACluster(
-            n_workers=NUM_GPU,
-            threads_per_worker=1,
-            memory_limit="16GB",  # Adjust based on your GPU memory
-            # rmm_pool_size=0.9,  # Use 90% of GPU memory as a pool for faster allocations
-            enable_cudf_spill=True,  # Improve device memory stability
-            local_directory="/tmp/",
-            CUDA_VISIBLE_DEVICES=",".join(str(i) for i in range(NUM_GPU)),
-        )
-        client = Client(cluster)
-        dask.config.set({"dataframe.backend": "cudf"})
-        print(f"Dask CUDA cluster initialized with {NUM_GPU} GPUs: {client}")
-        print(client.dashboard_link)
-
     data_loader = DataLoader()
     data_loader.import_ticks()
     data_loader.resample_data()
@@ -57,12 +34,8 @@ def debug_single():
         14, 14, 14, 14, 14, 14, 15,  # ATR length (7 timeframes)
         0.6, 0.6  # Model thresholds (buy, sell)
     ]
-    go = GeneticOptimizer(data_loader, session_id="debug123", cudfCluster=client)
+    go = GeneticOptimizer(data_loader, session_id="debug123")
     go.debug_single_individual(params)
-
-    if USING_CUDF and NUM_GPU > 1:
-        client.close()
-        cluster.close()
 
 if __name__ == "__main__":
     debug_single()
