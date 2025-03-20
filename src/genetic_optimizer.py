@@ -71,8 +71,8 @@ def local_evaluate_individual(args):
     """
     Evaluate a single individual locally using multiprocessing.
     """
-    optimizer, individual = args
-    return optimizer.evaluate_individual(individual)
+    optimizer, individual, gpuId = args
+    return optimizer.evaluate_individual(individual, gpuId=gpuId)
 
 class GeneticOptimizer:
     def __init__(self, data_loader: DataLoader, session_id=None, gen=None,
@@ -342,8 +342,8 @@ class GeneticOptimizer:
         self.features_df = self.features_df.dropna()
 
         # Exit early for debugging - even before processing all indicators
-        logger.info("Exiting early for debugging")
-        exit()
+        # logger.info("Exiting early for debugging")
+        # exit()
         
         # Filter by date (not reached due to exit)
         self.features_df = self.data_loader.filter_data_by_date(
@@ -451,8 +451,43 @@ class GeneticOptimizer:
             tasks = [ray_evaluate_individual.remote(self, ind) for ind in individuals]
             results = ray.get(tasks)
         elif processing == "local":
-            with Pool(processes=self.config.get("num_processes", 4)) as pool:
-                results = pool.map(local_evaluate_individual, [(self, ind) for ind in individuals])
+            if USING_CUDF:
+                num_processes = NUM_GPU
+                pools = []
+                results = []
+                individual_chunks = [[] for _ in range(num_processes)]  # List of lists to hold individuals for each GPU
+
+                # Distribute individuals to GPU chunks in a round-robin fashion
+                gpu_id_counter = 0
+                for ind in individuals:
+                    gpu_id = gpu_id_counter % num_processes
+                    individual_chunks[gpu_id].append(ind)
+                    gpu_id_counter += 1
+
+                # Create a pool for each GPU and process assigned individuals
+                for gpu_id in range(num_processes):
+                    pool = Pool(processes=2)  # Each pool has only 1 process, dedicated to a GPU
+                    pools.append(pool)
+                    args_list_for_gpu = [(self, ind, gpu_id) for ind in
+                                         individual_chunks[gpu_id]]  # Prepare args for this GPU
+                    async_result = pool.map_async(local_evaluate_individual,
+                                                  args_list_for_gpu)  # Use map_async for non-blocking execution
+                    results.append(async_result)
+
+                # Collect results from all pools - this will block until all pools are done
+                final_results = []
+                for async_result in results:
+                    final_results.extend(async_result.get())  # Get results from each pool and extend the final list
+                results = final_results
+
+                for pool in pools:  # Close all pools
+                    pool.close()
+                    pool.join()
+
+            else:  # If not using CUDF, fallback to the original local processing
+                num_processes = self.config.get("num_processes", 4)
+                with Pool(processes=num_processes) as pool:
+                    results = pool.map(local_evaluate_individual, [(self, ind) for ind in individuals])
         else:
             results = [self.evaluate_individual(ind) for ind in individuals]
         return results
