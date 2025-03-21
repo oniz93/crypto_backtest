@@ -177,42 +177,78 @@ def normalize_rsi(rsi):
 
 def normalize_price_vec(prices, max_price=150000):
     """
-    Vectorized normalization for price values, supporting NumPy and CuPy arrays.
+    Vectorized normalization for price values.
+
+    Parameters:
+        prices: Array of prices (NumPy or CuPy array, or Pandas/cuDF Series).
+        max_price (float): Maximum price value.
+
+    Returns:
+        Array of normalized prices, same type as input.
     """
-    if HAS_CUPY and isinstance(prices, (cp.ndarray, cudf.Series)):
+    # Check if this is a cuDF Series or DataFrame
+    if HAS_CUPY and hasattr(prices, 'to_cupy'):
+        # For cuDF Series/DataFrame (replace with native clip)
         norm = 2 * (prices / max_price) - 1
-        return cp.clip(norm, -1, 1)
+        norm = norm.clip(lower=-1, upper=1)
+        return norm
     else:
+        # For numpy arrays or pandas Series
         norm = 2 * (prices / max_price) - 1
         return np.clip(norm, -1, 1)
 
 def normalize_volume_vec(volumes, max_volume=1000000):
     """
-    Vectorized normalization for volume values, supporting NumPy and CuPy arrays.
+    Vectorized normalization for volume values.
+
+    Parameters:
+        volumes: Array of volumes (NumPy or CuPy array, or Pandas/cuDF Series).
+        max_volume (float): Maximum volume.
+
+    Returns:
+        Array of normalized volumes, same type as input.
     """
-    if HAS_CUPY and isinstance(volumes, (cp.ndarray, cudf.Series)):
+    # Check if this is a cuDF Series or DataFrame
+    if HAS_CUPY and hasattr(volumes, 'to_cupy'):
+        # For cuDF Series/DataFrame (replace with native clip)
         norm = 2 * (volumes / max_volume) - 1
-        return cp.clip(norm, -1, 1)
+        norm = norm.clip(lower=-1, upper=1)
+        return norm
     else:
+        # For numpy arrays or pandas Series
         norm = 2 * (volumes / max_volume) - 1
         return np.clip(norm, -1, 1)
 
 def normalize_diff_vec(diffs, max_diff=150000):
     """
-    Vectorized normalization for difference values, supporting NumPy and CuPy arrays.
+    Vectorized normalization for difference values.
+
+    Parameters:
+        diffs: Array of differences (NumPy or CuPy array, or Pandas/cuDF Series).
+        max_diff (float): Maximum absolute difference.
+
+    Returns:
+        Array of normalized differences, same type as input.
     """
-    if HAS_CUPY and isinstance(diffs, (cp.ndarray, cudf.Series)):
+    # Check if this is a cuDF Series or DataFrame
+    if HAS_CUPY and hasattr(diffs, 'to_cupy'):
+        # For cuDF Series/DataFrame (replace with native clip)
         norm = diffs / max_diff
-        return cp.clip(norm, -1, 1)
+        norm = norm.clip(lower=-1, upper=1)
+        return norm
     else:
+        # For numpy arrays or pandas Series
         norm = diffs / max_diff
         return np.clip(norm, -1, 1)
 
 def normalize_rsi_vec(rsis):
     """
-    Vectorized normalization for RSI values, supporting NumPy and CuPy arrays.
+    Vectorized normalization for RSI values.
+
+    Parameters:
+        rsis: Array of RSI values (NumPy or CuPy array, or Pandas/cuDF Series).
+
+    Returns:
+        Array of normalized RSI values, same type as input.
     """
-    if HAS_CUPY and isinstance(rsis, (cp.ndarray, cudf.Series)):
-        return (rsis / 50) - 1
-    else:
-        return (rsis / 50) - 1
+    return (rsis / 50) - 1
