@@ -469,7 +469,7 @@ class GeneticOptimizer:
 
                 # Create a pool for each GPU and process assigned individuals
                 for gpu_id in range(num_processes):
-                    pool = Pool(processes=2)  # Each pool has only 1 process, dedicated to a GPU
+                    pool = Pool(processes=1)  # Each pool has only 1 process, dedicated to a GPU
                     pools.append(pool)
                     args_list_for_gpu = [(self, ind, gpu_id) for ind in
                                          individual_chunks[gpu_id]]  # Prepare args for this GPU

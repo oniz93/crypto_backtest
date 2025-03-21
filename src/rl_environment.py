@@ -8,21 +8,25 @@ This module defines the TradingEnvironment class which simulates trading.
 import logging
 import numpy as np
 
+from src.utils import normalize_price_vec, normalize_volume_vec, normalize_diff_vec, cp, HAS_CUPY # Import cp and HAS_CUPY
+
 logger = logging.getLogger('GeneticOptimizer')
 
 class TradingEnvironment:
     def __init__(self, price_data, indicators, mode="long", initial_capital=100000,
                  transaction_cost=0.005, max_steps=500000, using_gpu=False):
-        from src.utils import normalize_price_vec, normalize_volume_vec, normalize_diff_vec, cp, HAS_CUPY # Import cp and HAS_CUPY
         self.portfolio_history = [] # Track portfolio value history
         self.initial_capital = initial_capital
         self.transaction_cost = transaction_cost
         self.max_steps = max_steps
         self.mode = mode
         self.using_gpu = using_gpu
-        if self.using_gpu:
+        self.use_cuda = using_gpu  # Add environment-level flag
+        if self.use_cuda:  # Use self.use_cuda here
             import cudf
-            self.data = cudf.DataFrame.from_pandas(price_data.join(indicators, how='inner').dropna().sort_index().to_pandas())
+            import cupy as cp  # Import cupy here as well
+            self.data = cudf.DataFrame.from_pandas(
+                price_data.join(indicators, how='inner').dropna().sort_index().to_pandas())
         else:
             self.data = price_data.join(indicators, how='inner').dropna().sort_index()
 
@@ -37,10 +41,10 @@ class TradingEnvironment:
             self.timestamps_list = self.data.index.tolist()
 
         # Precompute normalized features
-        if self.using_gpu and HAS_CUPY: # Use cp.zeros_like when using GPU and CuPy is available
-            self.norm_features = cp.zeros_like(self.data_values, dtype=np.float32)
+        if self.use_cuda and HAS_CUPY: # Use self.use_cuda here
+            self.norm_features = cp.asarray(self.data_values, dtype=cp.float32) # Convert to CuPy
         else:
-            self.norm_features = np.zeros_like(self.data_values, dtype=np.float32)
+            self.norm_features = self.data_values.astype(np.float32) # Keep as numpy, but ensure float32
 
         for i, col in enumerate(self.columns):
             if col in ['open', 'high', 'low', 'close']:
@@ -86,7 +90,6 @@ class TradingEnvironment:
         return self._get_state()
 
     def _get_state(self, step=None):
-        from src.utils import normalize_price_vec, normalize_diff_vec, cp, HAS_CUPY
         import numpy as np
 
         step = self.current_step if step is None else step
@@ -106,19 +109,22 @@ class TradingEnvironment:
         # Compute cash ratio
         cash_ratio = self.cash / self.initial_capital
 
-        if self.using_gpu and HAS_CUPY:
-            # Convert all elements to Python scalars
+        if self.use_cuda and HAS_CUPY:  # Use self.use_cuda here
+            # Convert all elements to Python scalars (as you are already doing)
             extra_features_list = [
-                float(norm_adjusted_buy),  # From NumPy scalar
-                float(norm_adjusted_sell),  # From NumPy scalar
-                float(self.inventory),  # From int/float or CuPy array
-                float(cash_ratio.item()) if isinstance(cash_ratio, cp.ndarray) else float(cash_ratio)  # From CuPy array or scalar
+                float(norm_adjusted_buy),
+                float(norm_adjusted_sell),
+                float(self.inventory),
+                float(cash_ratio.item()) if isinstance(cash_ratio, cp.ndarray) else float(cash_ratio)
             ]
-            extra_features = cp.array(extra_features_list, dtype=cp.float32)
-            return cp.concatenate([row, extra_features])
+            extra_features_numpy = np.array(extra_features_list, dtype=np.float32)  # Create as numpy first
+            extra_features_cupy = cp.asarray(extra_features_numpy)  # Then convert to CuPy
+            row_cupy = cp.asarray(row)  # Ensure row is also CuPy
+            return cp.concatenate([row_cupy, extra_features_cupy])  # Concatenate CuPy arrays
         else:
             # Non-GPU case: all elements are NumPy-compatible
-            extra_features = np.array([norm_adjusted_buy, norm_adjusted_sell, self.inventory, cash_ratio], dtype=np.float32)
+            extra_features = np.array([norm_adjusted_buy, norm_adjusted_sell, self.inventory, cash_ratio],
+                                      dtype=np.float32)
             return np.concatenate([row, extra_features])
 
     def step(self, action):
@@ -314,8 +320,14 @@ class TradingEnvironment:
                 reward += 5000
             elif portfolio_after < 0.75 * self.initial_capital:
                 reward -= 10000
-
-        next_state = self._get_state(next_step) if not done else np.zeros(self.state_dim)
+        if done:
+            next_state = np.zeros(self.state_dim)  # Keep as numpy when done (terminal state)
+        else:
+            next_state_numpy = self._get_state(next_step)  # Get numpy state
+            if self.use_cuda and HAS_CUPY:  # Convert to cupy if using GPU
+                next_state = cp.asarray(next_state_numpy)
+            else:
+                next_state = next_state_numpy
         self.current_step = next_step
         if self.current_step % 1000 == 0:
             logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")

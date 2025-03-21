@@ -253,25 +253,29 @@ class DQNAgent:
                           (state, action, reward, next_state, done)
         """
         states, actions, rewards, next_states, dones = zip(*batch)
-        # Handle state conversion based on use_cudf
-        if self.use_cudf and HAS_CUPY:
-            states_numpy = np.stack([self._ensure_history(s).get() for s in states]) # Convert cupy arrays to numpy for stacking, then to tensor
-            next_states_numpy = np.stack([self._ensure_history(s).get() for s in next_states])
-            states = torch.from_numpy(states_numpy).float().to(self.device)
-            next_states = torch.from_numpy(next_states_numpy).float().to(self.device)
+        processed_states = [self._ensure_history(s) for s in states]
+        processed_next_states = [self._ensure_history(s) for s in next_states]
 
-        else: # numpy path
-            states = torch.from_numpy(np.stack([self._ensure_history(s) for s in states])).float().to(self.device)
-            next_states = torch.from_numpy(np.stack([self._ensure_history(s) for s in next_states])).float().to(self.device)
+        # Ensure all processed states are NumPy arrays
+        processed_states_np = [cp.asnumpy(s) if isinstance(s, cp.ndarray) else s for s in processed_states]
+        processed_next_states_np = [cp.asnumpy(s) if isinstance(s, cp.ndarray) else s for s in processed_next_states]
+
+        # Stack as NumPy arrays
+        states_numpy = np.stack(processed_states_np, axis=0)
+        next_states_numpy = np.stack(processed_next_states_np, axis=0)
+
+        # Convert to PyTorch tensors
+        states = torch.from_numpy(states_numpy).float().to(self.device)
+        next_states = torch.from_numpy(next_states_numpy).float().to(self.device)
 
         actions = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
-        rewards = torch.tensor(rewards, dtype=torch.float, device=self.device).unsqueeze(1)
+        rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(1)
         dones = torch.tensor(dones, dtype=torch.float, device=self.device).unsqueeze(1)
 
         self.optimizer.zero_grad()
         if self.scaler:
             with torch.amp.autocast(device_type=self.device.type):
-                q_values, _ = self.q_net(states, env=self.env)  # Pass env here too
+                q_values, _ = self.q_net(states, env=self.env)
                 q_values = q_values.gather(1, actions)
                 with torch.no_grad():
                     max_next_q, _ = self.target_net(next_states, env=self.env)
