@@ -361,7 +361,7 @@ class GeneticOptimizer:
         transaction_cost = 0.005
         mode = self.config.get('training_mode')
         return TradingEnvironment(price_data, indicators, initial_capital=initial_capital,
-                                 transaction_cost=transaction_cost, mode=mode)
+                                 transaction_cost=transaction_cost, mode=mode, using_gpu=USING_CUDF)
 
     def run_rl_training(self, env, episodes=1):
         """
@@ -372,7 +372,7 @@ class GeneticOptimizer:
         chunk_size = self.config.get('chunk_size', 4000)
         batch_frequency = 32
 
-        agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3, seq_length=seq_length, epsilon_decay=0.995)
+        agent = DQNAgent(state_dim=env.state_dim, action_dim=env.action_dim, lr=1e-3, seq_length=seq_length, epsilon_decay=0.995, use_cudf=USING_CUDF)
         agent.env = env
         full_data_np = env.data.values
         all_indices = np.arange(len(full_data_np))
@@ -391,7 +391,10 @@ class GeneticOptimizer:
                 logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{num_chunks} (size {chunk_len} rows)...")
                 env.data_values = full_data_np[indices]
                 env.n_steps = len(indices)
-                env.timestamps_list = env.data.index[indices].tolist()
+                if USING_CUDF:
+                    env.timestamps_list = env.data.index[indices].to_pandas().tolist()
+                else:
+                    env.timestamps_list = env.data.index[indices].tolist()
                 state = env.reset()
                 chunk_reward = 0.0
                 done = False

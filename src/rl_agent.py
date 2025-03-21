@@ -2,13 +2,7 @@
 rl_agent.py
 -----------
 This module defines the reinforcement learning (RL) agent.
-The agent uses a hybrid network architecture that processes the input as follows:
-    1. A CNN layer reduces the high-dimensional input features.
-    2. A TCN (Temporal Convolutional Network) block captures temporal patterns.
-    3. A GRU layer further models sequential dependencies.
-    4. A final fully connected layer produces Q-values for each action.
-This architecture is designed to be much smaller (and faster) than using LSTM layers,
-so that the model can process 1000 steps in less than 5 seconds.
+... (rest of the header) ...
 """
 
 import numpy as np
@@ -16,6 +10,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from collections import deque
+
+try:
+    import cupy as cp
+    HAS_CUPY = True
+except ImportError:
+    HAS_CUPY = False
+    cp = None
+
 
 # ---------------------------
 # Hybrid Q-Network: CNN -> TCN -> GRU -> Fully Connected Layer
@@ -59,7 +61,7 @@ class HybridQNetwork(nn.Module):
             tuple: (q_values, hidden_state) where q_values is of shape (batch, action_dim).
         """
         # Save the last timestep of the input state to access extra features.
-        # The extra features appended by the environment are: 
+        # The extra features appended by the environment are:
         # [norm_adjusted_buy, norm_adjusted_sell, inventory, cash_ratio, norm_entry_diff]
         # We assume that the "inventory" (a proxy for whether entry_price is set) is at index: state_dim - 3.
         if x.dim() == 2:
@@ -84,8 +86,8 @@ class HybridQNetwork(nn.Module):
 
         # Adjust Q-values based on gain_loss and inventory if env is provided
         if env is not None:
-            gain_loss = torch.tensor([env.gain_loss], dtype=torch.float32, device=x.device).expand(x.size(0))  # (batch,)
-            inventory = torch.tensor([env.inventory], dtype=torch.float32, device=x.device).expand(x.size(0))  # (batch,)
+            gain_loss = torch.tensor([float(env.gain_loss)], dtype=torch.float32, device=x.device).expand(x.size(0))  # (batch,)
+            inventory = torch.tensor([float(env.inventory)], dtype=torch.float32, device=x.device).expand(x.size(0))  # (batch,)
             has_position = (torch.abs(inventory) > 1e-6).float()  # (batch,)
 
             # Discourage invalid actions
@@ -94,7 +96,7 @@ class HybridQNetwork(nn.Module):
 
             # Inhibit sell (action 2) when gain_loss is negative
             discourage_sell = (gain_loss < 0.0).float() * has_position
-            fee_penalty = torch.tensor([env.total_fees * 1.0], dtype=torch.float32, device=x.device).expand(
+            fee_penalty = torch.tensor([float(env.total_fees) * 1.0], dtype=torch.float32, device=x.device).expand(
                 x.size(0))  # Scale penalty by fees
             q_values[:, 2] -= discourage_sell * (2.0 * torch.abs(gain_loss) + fee_penalty)  # Reduce sell Q-value proportionally
 
@@ -106,7 +108,7 @@ class HybridQNetwork(nn.Module):
 class DQNAgent:
     def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99,
                  epsilon=1.0, epsilon_decay=0.999, epsilon_min=0.01,
-                 seq_length=720, buffer_capacity=5000):
+                 seq_length=720, buffer_capacity=5000, use_cudf=False):
         """
         DQN Agent that uses the HybridQNetwork (CNN -> TCN -> GRU -> FC) for Q-learning.
 
@@ -118,7 +120,7 @@ class DQNAgent:
             epsilon (float): Initial exploration rate.
             epsilon_decay (float): Decay factor for exploration rate.
             epsilon_min (float): Minimum exploration rate.
-            seq_length (int): Length of the input history (number of timesteps).
+            seq_length (int): Length of the inpout history (number of timesteps).
             buffer_capacity (int): Capacity of the replay buffer.
             per_alpha (float): Prioritization exponent for the replay buffer.
             per_beta (float): Initial importance-sampling exponent.
@@ -131,6 +133,8 @@ class DQNAgent:
         #     device = "mps"
         else:
             device = "cpu"
+
+        self.use_cudf=use_cudf
         self.device = torch.device(device)
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -162,13 +166,22 @@ class DQNAgent:
         Returns:
             np.array: State with shape (seq_length, state_dim).
         """
-        state = np.asarray(state, dtype=np.float32)  # Faster conversion
-        if state.ndim == 1:
-            return np.tile(state, (self.seq_length, 1))
-        pad_size = self.seq_length - state.shape[0]
-        if pad_size > 0:
-            return np.pad(state, ((0, pad_size), (0, 0)), mode='edge')
-        return state[:self.seq_length, :]
+        if self.use_cudf and HAS_CUPY and isinstance(state, cp.ndarray):
+            state_cupy = state.astype(cp.float32) # keep as cupy array
+            if state_cupy.ndim == 1:
+                return cp.tile(state_cupy, (self.seq_length, 1))
+            pad_size = self.seq_length - state_cupy.shape[0]
+            if pad_size > 0:
+                return cp.pad(state_cupy, ((0, pad_size), (0, 0)), mode='edge')
+            return state_cupy[:self.seq_length, :]
+        else: # numpy path
+            state_numpy = np.asarray(state, dtype=np.float32)  # Faster conversion
+            if state_numpy.ndim == 1:
+                return np.tile(state_numpy, (self.seq_length, 1))
+            pad_size = self.seq_length - state_numpy.shape[0]
+            if pad_size > 0:
+                return np.pad(state_numpy, ((0, pad_size), (0, 0)), mode='edge')
+            return state_numpy[:self.seq_length, :]
 
     def select_action(self, state):
         """
@@ -181,8 +194,12 @@ class DQNAgent:
             int: Chosen action index (0=hold, 1=buy, 2=sell).
         """
         state = self._ensure_history(state)
-        state_tensor = torch.FloatTensor(state).to(self.device).unsqueeze(0)
-        inventory = state[-1, self.state_dim - 2]  # Inventory is now at index -2
+        if self.use_cudf and HAS_CUPY and isinstance(state, cp.ndarray):
+            state_tensor = torch.from_numpy(state.get()).float().to(self.device).unsqueeze(0) # Convert cupy array to numpy then torch tensor
+            inventory = state[-1, self.state_dim - 2].get()  # Inventory is now at index -2, get value from cupy array
+        else:
+            state_tensor = torch.FloatTensor(state).to(self.device).unsqueeze(0)
+            inventory = state[-1, self.state_dim - 2]  # Inventory is now at index -2
         has_position = abs(inventory) > 1e-6
 
         valid_actions = [0]
@@ -236,8 +253,17 @@ class DQNAgent:
                           (state, action, reward, next_state, done)
         """
         states, actions, rewards, next_states, dones = zip(*batch)
-        states = torch.from_numpy(np.stack([self._ensure_history(s) for s in states])).float().to(self.device)
-        next_states = torch.from_numpy(np.stack([self._ensure_history(s) for s in next_states])).float().to(self.device)
+        # Handle state conversion based on use_cudf
+        if self.use_cudf and HAS_CUPY:
+            states_numpy = np.stack([self._ensure_history(s).get() for s in states]) # Convert cupy arrays to numpy for stacking, then to tensor
+            next_states_numpy = np.stack([self._ensure_history(s).get() for s in next_states])
+            states = torch.from_numpy(states_numpy).float().to(self.device)
+            next_states = torch.from_numpy(next_states_numpy).float().to(self.device)
+
+        else: # numpy path
+            states = torch.from_numpy(np.stack([self._ensure_history(s) for s in states])).float().to(self.device)
+            next_states = torch.from_numpy(np.stack([self._ensure_history(s) for s in next_states])).float().to(self.device)
+
         actions = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
         rewards = torch.tensor(rewards, dtype=torch.float, device=self.device).unsqueeze(1)
         dones = torch.tensor(dones, dtype=torch.float, device=self.device).unsqueeze(1)

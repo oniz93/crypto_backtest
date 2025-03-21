@@ -2,9 +2,7 @@
 rl_environment.py
 -----------------
 This module defines the TradingEnvironment class which simulates trading.
-It uses price data and technical indicators to simulate trading actions (buy, sell, hold)
-and computes rewards based on changes in portfolio value.
-It is designed to be used by the RL agent.
+... (rest of the header) ...
 """
 
 import logging
@@ -14,31 +12,61 @@ logger = logging.getLogger('GeneticOptimizer')
 
 class TradingEnvironment:
     def __init__(self, price_data, indicators, mode="long", initial_capital=100000,
-                 transaction_cost=0.005, max_steps=500000):
-        from src.utils import normalize_price_vec, normalize_volume_vec, normalize_diff_vec
+                 transaction_cost=0.005, max_steps=500000, using_gpu=False):
+        from src.utils import normalize_price_vec, normalize_volume_vec, normalize_diff_vec, cp, HAS_CUPY # Import cp and HAS_CUPY
         self.portfolio_history = [] # Track portfolio value history
         self.initial_capital = initial_capital
         self.transaction_cost = transaction_cost
         self.max_steps = max_steps
         self.mode = mode
-        self.data = price_data.join(indicators, how='inner').dropna().sort_index()
+        self.using_gpu = using_gpu
+        if self.using_gpu:
+            import cudf
+            self.data = cudf.DataFrame.from_pandas(price_data.join(indicators, how='inner').dropna().sort_index().to_pandas())
+        else:
+            self.data = price_data.join(indicators, how='inner').dropna().sort_index()
+
         self.data_values = self.data.values
         self.columns = self.data.columns
         self.close_index = self.columns.get_loc('close')
         self.n_steps = len(self.data_values)
-        self.timestamps_list = self.data.index.tolist()
+
+        if self.using_gpu:
+            self.timestamps_list = self.data.index.to_pandas().tolist()
+        else:
+            self.timestamps_list = self.data.index.tolist()
 
         # Precompute normalized features
-        self.norm_features = np.zeros_like(self.data_values, dtype=np.float32)
+        if self.using_gpu and HAS_CUPY: # Use cp.zeros_like when using GPU and CuPy is available
+            self.norm_features = cp.zeros_like(self.data_values, dtype=np.float32)
+        else:
+            self.norm_features = np.zeros_like(self.data_values, dtype=np.float32)
+
         for i, col in enumerate(self.columns):
             if col in ['open', 'high', 'low', 'close']:
-                self.norm_features[:, i] = normalize_price_vec(self.data_values[:, i])
+                if self.using_gpu:
+                    close_values = self.data_values[:, i] # Keep as cudf series/cupy array
+                else:
+                    close_values = self.data_values[:, i]
+                self.norm_features[:, i] = normalize_price_vec(close_values)
             elif col == 'volume':
-                self.norm_features[:, i] = normalize_volume_vec(self.data_values[:, i])
+                if self.using_gpu:
+                    volume_values = self.data_values[:, i] # Keep as cudf series/cupy array
+                else:
+                    volume_values = self.data_values[:, i]
+                self.norm_features[:, i] = normalize_volume_vec(volume_values)
             elif col.startswith('VWAP') or col.startswith('VWMA'):
-                self.norm_features[:, i] = normalize_diff_vec(self.data_values[:, i])
+                if self.using_gpu:
+                    diff_values = self.data_values[:, i] # Keep as cudf series/cupy array
+                else:
+                    diff_values = self.data_values[:, i]
+                self.norm_features[:, i] = normalize_diff_vec(diff_values)
             elif col.startswith('cluster_'):
-                self.norm_features[:, i] = normalize_volume_vec(self.data_values[:, i])
+                if self.using_gpu:
+                    cluster_values = self.data_values[:, i] # Keep as cudf series/cupy array
+                else:
+                    cluster_values = self.data_values[:, i]
+                self.norm_features[:, i] = normalize_volume_vec(cluster_values)
             else:
                 self.norm_features[:, i] = self.data_values[:, i]
 
@@ -58,16 +86,41 @@ class TradingEnvironment:
         return self._get_state()
 
     def _get_state(self, step=None):
-        from src.utils import normalize_price_vec, normalize_diff_vec
+        from src.utils import normalize_price_vec, normalize_diff_vec, cp, HAS_CUPY
+        import numpy as np
+        
         step = self.current_step if step is None else step
         row = self.norm_features[step]
         close_price = self.data_values[step, self.close_index]
-        norm_adjusted_buy = normalize_price_vec(np.array([close_price * (1 + self.transaction_cost)]))[0]
-        norm_adjusted_sell = normalize_price_vec(np.array([close_price / (1 + self.transaction_cost)]))[0]
-        extra_features = np.array([norm_adjusted_buy, norm_adjusted_sell, self.inventory,
-                                   self.cash / self.initial_capital], dtype=np.float32)  # Removed norm_gain_loss
-        return np.concatenate([row, extra_features])
+        
+        # Convert close_price to NumPy scalar if using GPU
+        if self.using_gpu:
+            close_price_numpy = close_price.get() if isinstance(close_price, cp.ndarray) else close_price
+        else:
+            close_price_numpy = close_price
 
+        # Compute adjusted prices as NumPy scalars
+        norm_adjusted_buy = normalize_price_vec(np.array([close_price_numpy * (1 + self.transaction_cost)]))[0]
+        norm_adjusted_sell = normalize_price_vec(np.array([close_price_numpy / (1 + self.transaction_cost)]))[0]
+
+        # Compute cash ratio
+        cash_ratio = self.cash / self.initial_capital
+
+        if self.using_gpu and HAS_CUPY:
+            # Convert all elements to Python scalars
+            extra_features_list = [
+                float(norm_adjusted_buy),  # From NumPy scalar
+                float(norm_adjusted_sell),  # From NumPy scalar
+                float(self.inventory),  # From int/float or CuPy array
+                float(cash_ratio.item()) if isinstance(cash_ratio, cp.ndarray) else float(cash_ratio)  # From CuPy array or scalar
+            ]
+            extra_features = cp.array(extra_features_list, dtype=cp.float32)
+            return cp.concatenate([row, extra_features])
+        else:
+            # Non-GPU case: all elements are NumPy-compatible
+            extra_features = np.array([norm_adjusted_buy, norm_adjusted_sell, self.inventory, cash_ratio], dtype=np.float32)
+            return np.concatenate([row, extra_features])
+        
     def step(self, action):
         current_price = self.data_values[self.current_step][self.close_index]
         portfolio_before = self.cash + self.inventory * current_price
@@ -86,23 +139,27 @@ class TradingEnvironment:
                         penalty = 0.01 * portfolio_before
                     else:
                         transaction_fee = buy_usd * self.transaction_cost
-                        self.total_fees += transaction_fee
+                        self.total_fees += float(transaction_fee)
                         total_cost = buy_usd + transaction_fee
                         if total_cost > self.cash:
                             penalty = 0.01 * portfolio_before
                         else:
-                            qty = buy_usd / current_price
+                            if self.using_gpu:
+                                current_price_cpu = current_price.get().max()
+                            else:
+                                current_price_cpu = current_price
+                            qty = buy_usd / current_price_cpu
                             buy_fee_per_share = transaction_fee / qty
                             if self.inventory > 0:
                                 old_value = self.inventory * self.entry_price
                                 old_fees = self.inventory * self.buy_fee_per_share
-                                new_value = qty * current_price
+                                new_value = qty * current_price_cpu
                                 new_fees = transaction_fee
                                 total_qty = self.inventory + qty
                                 self.entry_price = (old_value + new_value) / total_qty
                                 self.buy_fee_per_share = (old_fees + new_fees) / total_qty
                             else:
-                                self.entry_price = current_price
+                                self.entry_price = current_price_cpu
                                 self.buy_fee_per_share = buy_fee_per_share
                             self.inventory = self.inventory + qty if self.inventory > 0 else qty
                             self.cash -= total_cost
@@ -116,7 +173,7 @@ class TradingEnvironment:
                 else:
                     proceeds = self.inventory * current_price
                     transaction_fee = proceeds * self.transaction_cost
-                    self.total_fees += transaction_fee
+                    self.total_fees += float(transaction_fee)
                     proceeds_after_fee = proceeds - transaction_fee
                     cost_basis = self.inventory * (self.entry_price + self.buy_fee_per_share)
                     realized_gain_loss = proceeds_after_fee - cost_basis
@@ -137,21 +194,25 @@ class TradingEnvironment:
                     if sell_usd < 100:
                         penalty = 0.01 * portfolio_before
                     else:
-                        qty = sell_usd / current_price  # Quantity to short
+                        if self.using_gpu:
+                            current_price_cpu = current_price.get()
+                        else:
+                            current_price_cpu = current_price
+                        qty = sell_usd / current_price_cpu  # Quantity to short
                         transaction_fee = sell_usd * self.transaction_cost
-                        self.total_fees += transaction_fee
+                        self.total_fees += float(transaction_fee)
                         proceeds = sell_usd - transaction_fee
                         if self.inventory < 0:  # Already short
                             old_value = abs(self.inventory) * self.entry_price
                             old_fees = abs(self.inventory) * self.buy_fee_per_share
-                            new_value = qty * current_price
+                            new_value = qty * current_price_cpu
                             new_fees = transaction_fee
                             total_qty = abs(self.inventory) + qty
                             self.entry_price = (old_value + new_value) / total_qty
                             self.buy_fee_per_share = (old_fees + new_fees) / total_qty
                             self.inventory -= qty
                         else:
-                            self.entry_price = current_price
+                            self.entry_price = current_price_cpu
                             self.buy_fee_per_share = transaction_fee / qty
                             self.inventory = -qty  # Negative inventory for short
                         self.cash += proceeds  # Receive proceeds from short sale
@@ -166,7 +227,7 @@ class TradingEnvironment:
                     qty_to_cover = abs(self.inventory)  # Cover entire short position
                     cost = qty_to_cover * current_price
                     transaction_fee = cost * self.transaction_cost
-                    self.total_fees += transaction_fee
+                    self.total_fees += float(transaction_fee)
                     total_cost = cost + transaction_fee
                     proceeds_from_short = qty_to_cover * self.entry_price  # Original short sale proceeds adjusted
                     realized_gain_loss = proceeds_from_short - total_cost  # Profit if entry > current
@@ -180,7 +241,10 @@ class TradingEnvironment:
         # Rest of the code remains largely the same
         next_step = self.current_step + 1
         done = next_step >= self.n_steps or next_step >= self.max_steps
-        new_price = self.data_values[next_step][self.close_index] if not done else current_price
+        if not done:
+            new_price = self.data_values[next_step][self.close_index]
+        else:
+            new_price = current_price
         portfolio_after = self.cash + self.inventory * new_price
 
         # Base reward
@@ -188,9 +252,17 @@ class TradingEnvironment:
 
         # Update gain_loss for both modes
         if self.inventory > 0:  # Long position
-            self.gain_loss = self.inventory * (new_price - self.entry_price) - self.inventory * self.buy_fee_per_share - self.total_fees
+            if self.using_gpu:
+                new_price_cpu = float(new_price.get())
+            else:
+                new_price_cpu = new_price
+            self.gain_loss = self.inventory * (new_price_cpu - self.entry_price) - self.inventory * self.buy_fee_per_share - self.total_fees
         elif self.inventory < 0:  # Short position
-            self.gain_loss = abs(self.inventory) * (self.entry_price - new_price) - abs(self.inventory) * self.buy_fee_per_share - self.total_fees
+             if self.using_gpu:
+                new_price_cpu = float(new_price.get())
+             else:
+                new_price_cpu = new_price
+             self.gain_loss = abs(self.inventory) * (self.entry_price - new_price_cpu) - abs(self.inventory) * self.buy_fee_per_share - self.total_fees
         else:
             self.gain_loss = 0.0
 
@@ -250,4 +322,4 @@ class TradingEnvironment:
 
         self.portfolio_history.append(portfolio_after)
 
-        return next_state, reward, done, {"n_step": next_step, "is_sell": is_sell, "gain_loss": realized_gain_loss}
+        return next_state, float(reward), done, {"n_step": next_step, "is_sell": is_sell, "gain_loss": realized_gain_loss}
