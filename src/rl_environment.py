@@ -88,11 +88,11 @@ class TradingEnvironment:
     def _get_state(self, step=None):
         from src.utils import normalize_price_vec, normalize_diff_vec, cp, HAS_CUPY
         import numpy as np
-        
+
         step = self.current_step if step is None else step
         row = self.norm_features[step]
         close_price = self.data_values[step, self.close_index]
-        
+
         # Convert close_price to NumPy scalar if using GPU
         if self.using_gpu:
             close_price_numpy = close_price.get() if isinstance(close_price, cp.ndarray) else close_price
@@ -120,7 +120,7 @@ class TradingEnvironment:
             # Non-GPU case: all elements are NumPy-compatible
             extra_features = np.array([norm_adjusted_buy, norm_adjusted_sell, self.inventory, cash_ratio], dtype=np.float32)
             return np.concatenate([row, extra_features])
-        
+
     def step(self, action):
         current_price = self.data_values[self.current_step][self.close_index]
         portfolio_before = self.cash + self.inventory * current_price
