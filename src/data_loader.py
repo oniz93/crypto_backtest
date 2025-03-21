@@ -112,11 +112,11 @@ class DataLoader:
             data = cudf.from_pandas(self.tick_data[timeframe])
         else:
             data = self.tick_data[timeframe].copy()
-        logger.info(f"Calculating indicator: {indicator_name}, Timeframe: {timeframe}, DataFrame Type: {type(data)}")
+        # logger.info(f"Calculating indicator: {indicator_name}, Timeframe: {timeframe}, DataFrame Type: {type(data)}")
         result = self.df_strategy.calculate_indicator(indicator_name, data, params, timeframe)
-        if timing_enabled:
-            elapsed = time.time() - t_start
-            logger.info(f"Indicator {indicator_name} with params {params} on timeframe {timeframe} computed in {elapsed:.4f} seconds.")
+        # if timing_enabled:
+        #     elapsed = time.time() - t_start
+        #     logger.info(f"Indicator {indicator_name} with params {params} on timeframe {timeframe} computed in {elapsed:.4f} seconds.")
         return result
 
     def filter_data_by_date(self, df, start_date: Union[str, datetime, date], end_date: Union[str, datetime, date]):

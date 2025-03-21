@@ -279,11 +279,11 @@ class GeneticOptimizer:
     def _calculate_indicator_worker(args):
         data_loader, indicator_name, timeframe, params = args
         action_start = time.time()
-        logger.info(f"_calculate_indicator_worker - Starting calculation for {indicator_name} on TF {timeframe} - Using cuDF: {USING_CUDF}")
+        # logger.info(f"_calculate_indicator_worker - Starting calculation for {indicator_name} on TF {timeframe} - Using cuDF: {USING_CUDF}")
         try:
             indicator_df = data_loader.calculate_indicator(indicator_name, params, timeframe)
             indicator_df = indicator_df.add_suffix(f'_{indicator_name}_{timeframe}')
-            logger.info(f"Calculation done {indicator_name} on TF {timeframe} took {time.time() - action_start:.2f}s")
+            # logger.info(f"Calculation done {indicator_name} on TF {timeframe} took {time.time() - action_start:.2f}s")
             if timeframe != data_loader.base_timeframe:
                 shift_duration = pd.to_timedelta(timeframe)
                 indicator_df_shifted = indicator_df.copy()
@@ -319,11 +319,11 @@ class GeneticOptimizer:
                                 else cudf.from_pandas(self.base_price_data) if USING_CUDF
             else self.base_price_data.copy())
 
-        logger.info(f"Initialized features_df as {type(self.features_df)}")
+        # logger.info(f"Initialized features_df as {type(self.features_df)}")
 
         for task in tasks:
                 indicator_name, timeframe, indicator_df = self._calculate_indicator_worker(task)
-                logger.info(f"Received result for {indicator_name} on TF {timeframe}")
+                # logger.info(f"Received result for {indicator_name} on TF {timeframe}")
 
                 indicator_df.columns = [col.replace('\n', '').strip() for col in indicator_df.columns]
                 self.features_df = self.features_df.join(indicator_df)
@@ -349,7 +349,7 @@ class GeneticOptimizer:
         self.features_df = self.data_loader.filter_data_by_date(
             self.features_df, self.config.get('start_simulation'), self.config.get('end_simulation')
         )
-        logger.info(f"Final features_df type: {type(self.features_df)}")
+        # logger.info(f"Final features_df type: {type(self.features_df)}")
         return self.features_df
 
     def create_environment(self, price_data, indicators):
