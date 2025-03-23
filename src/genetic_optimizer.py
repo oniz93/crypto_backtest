@@ -251,6 +251,7 @@ class GeneticOptimizer:
         del indicators_only
         logger.info("Starting RL training for individual...")
         agent, avg_profit = self.run_rl_training(env, episodes=self.config.get('episodes', 20), generation=generation)
+        del env
         return (-avg_profit,), avg_profit, agent
 
     def extract_config_from_individual(self, individual):
@@ -442,6 +443,9 @@ class GeneticOptimizer:
 
         logger.info(f"RL training over {episodes} episodes completed. Reward: {total_reward_sum:.2f}")
         del full_data_np
+        del env.data_values
+        del env.data
+        del agent.env
         gc.collect()
         return agent, total_reward_sum
 
