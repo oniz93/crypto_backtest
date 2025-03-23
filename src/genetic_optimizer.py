@@ -388,10 +388,10 @@ class GeneticOptimizer:
             ep_reward = 0.0
 
             for i, indices in enumerate(chunk_indices):
+                chunk_len = len(indices)
                 logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{num_chunks} (size {chunk_len} rows) | Max chunks: {generation}")
                 if generation is not None and i >= generation:
                     break
-                chunk_len = len(indices)
                 env.data_values = full_data_np[indices]
                 env.n_steps = len(indices)
                 if USING_CUDF:
@@ -450,7 +450,7 @@ class GeneticOptimizer:
         if processing == "ray":
             if not ray.is_initialized():
                 ray.init(ignore_reinit_error=True)
-            tasks = [ray_evaluate_individual.remote(self, ind) for ind in individuals]
+            tasks = [ray_evaluate_individual.remote(self, ind, generation) for ind in individuals]
             results = ray.get(tasks)
         elif processing == "local":
             if USING_CUDF:
@@ -514,11 +514,11 @@ class GeneticOptimizer:
             pop = self.toolbox.population(n=INITIAL_POPULATION)
 
         logger.info("Evaluating initial population...")
-        results = self.evaluate_individuals(pop)
-        for ind, (fit, avg_profit, agent) in zip(pop, results):
-            ind.fitness.values = fit
-            ind.avg_profit = avg_profit
-            ind.agent = agent
+        # results = self.evaluate_individuals(pop, generation=1)
+        # for ind, (fit, avg_profit, agent) in zip(pop, results):
+        #     ind.fitness.values = fit
+        #     ind.avg_profit = avg_profit
+        #     ind.agent = agent
 
         for gen in range(1, NGEN + 1):
             logger.info(f"=== Generation {gen} ===")
@@ -535,7 +535,7 @@ class GeneticOptimizer:
                     del mutant.fitness.values
             invalid_inds = [ind for ind in offspring if not ind.fitness.valid]
             logger.info(f"Evaluating {len(invalid_inds)} individuals with {self.config.get('processing', 'ray')} processing...")
-            results = self.evaluate_individuals(invalid_inds)
+            results = self.evaluate_individuals(invalid_inds, generation=gen)
             for ind, (fit, avg_profit, agent) in zip(invalid_inds, results):
                 ind.fitness.values = fit
                 ind.avg_profit = avg_profit
