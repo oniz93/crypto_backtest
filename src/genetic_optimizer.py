@@ -61,18 +61,18 @@ except Exception as e:
     logger.error(f"Failed to open named pipe {pipe_path}: {e}")
 
 @ray.remote
-def ray_evaluate_individual(pickled_class, individual):
+def ray_evaluate_individual(pickled_class, individual, generation=None):
     """
     Remote function for evaluating one individual using Ray.
     """
-    return pickled_class.evaluate_individual(individual)
+    return pickled_class.evaluate_individual(individual, generation=generation)
 
 def local_evaluate_individual(args):
     """
     Evaluate a single individual locally using multiprocessing.
     """
-    optimizer, individual, gpuId = args
-    return optimizer.evaluate_individual(individual, gpuId=gpuId)
+    optimizer, individual, gpuId, generation = args
+    return optimizer.evaluate_individual(individual, gpuId=gpuId, generation=generation)
 
 class GeneticOptimizer:
     def __init__(self, data_loader: DataLoader, session_id=None, gen=None,
@@ -208,7 +208,7 @@ class GeneticOptimizer:
             ind.append(val)
         return icls(ind)
 
-    def evaluate_individual(self, individual, useLocal=False, gpuId=None):
+    def evaluate_individual(self, individual, useLocal=False, gpuId=None, generation=None):
         """
         Evaluate an individual by computing indicator features, filtering data,
         and running RL training.
@@ -250,7 +250,7 @@ class GeneticOptimizer:
         env = self.create_environment(price_data, indicators_only)
         del indicators_only
         logger.info("Starting RL training for individual...")
-        agent, avg_profit = self.run_rl_training(env, episodes=self.config.get('episodes', 20))
+        agent, avg_profit = self.run_rl_training(env, episodes=self.config.get('episodes', 20), generation=generation)
         return (-avg_profit,), avg_profit, agent
 
     def extract_config_from_individual(self, individual):
@@ -364,7 +364,7 @@ class GeneticOptimizer:
         return TradingEnvironment(price_data, indicators, initial_capital=initial_capital,
                                  transaction_cost=transaction_cost, mode=mode, using_gpu=USING_CUDF)
 
-    def run_rl_training(self, env, episodes=1):
+    def run_rl_training(self, env, episodes=1, generation=None):
         """
         Run reinforcement learning training on the trading environment using dataset-level chunking.
         """
@@ -388,8 +388,10 @@ class GeneticOptimizer:
             ep_reward = 0.0
 
             for i, indices in enumerate(chunk_indices):
+                logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{num_chunks} (size {chunk_len} rows) | Max chunks: {generation}")
+                if generation is not None and i >= generation:
+                    break
                 chunk_len = len(indices)
-                logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{num_chunks} (size {chunk_len} rows)...")
                 env.data_values = full_data_np[indices]
                 env.n_steps = len(indices)
                 if USING_CUDF:
@@ -438,13 +440,12 @@ class GeneticOptimizer:
             episode_count += 1
             logger.info(f"Episode {ep + 1} completed. Total episode reward: {ep_reward:.2f}")
 
-        avg_reward = total_reward_sum / episode_count if episode_count > 0 else 0.0
-        logger.info(f"RL training over {episodes} episodes completed. Average reward: {avg_reward:.2f}")
+        logger.info(f"RL training over {episodes} episodes completed. Reward: {total_reward_sum:.2f}")
         del full_data_np
         gc.collect()
-        return agent, avg_reward
+        return agent, total_reward_sum
 
-    def evaluate_individuals(self, individuals):
+    def evaluate_individuals(self, individuals, generation=None):
         processing = self.config.get("processing", "ray").lower()
         if processing == "ray":
             if not ray.is_initialized():
@@ -469,7 +470,7 @@ class GeneticOptimizer:
                 for gpu_id in range(num_processes):
                     pool = Pool(processes=1)  # Each pool has only 1 process, dedicated to a GPU
                     pools.append(pool)
-                    args_list_for_gpu = [(self, ind, gpu_id) for ind in
+                    args_list_for_gpu = [(self, ind, gpu_id, generation) for ind in
                                          individual_chunks[gpu_id]]  # Prepare args for this GPU
                     async_result = pool.map_async(local_evaluate_individual,
                                                   args_list_for_gpu)  # Use map_async for non-blocking execution
@@ -488,9 +489,9 @@ class GeneticOptimizer:
             else:  # If not using CUDF, fallback to the original local processing
                 num_processes = self.config.get("num_processes", 4)
                 with Pool(processes=num_processes) as pool:
-                    results = pool.map(local_evaluate_individual, [(self, ind) for ind in individuals])
+                    results = pool.map(local_evaluate_individual, [(self, ind, None, generation) for ind in individuals])
         else:
-            results = [self.evaluate_individual(ind) for ind in individuals]
+            results = [self.evaluate_individual(ind, generation=generation) for ind in individuals]
         return results
 
     def run(self):
@@ -500,7 +501,7 @@ class GeneticOptimizer:
         NGEN = 100
         CXPB = 0.5
         MUTPB = 0.1
-        INITIAL_POPULATION = 100
+        INITIAL_POPULATION = 1000
 
         os.makedirs(f"population/{self.session_id}", exist_ok=True)
         os.makedirs(f"weights/{self.session_id}", exist_ok=True)
@@ -521,7 +522,7 @@ class GeneticOptimizer:
 
         for gen in range(1, NGEN + 1):
             logger.info(f"=== Generation {gen} ===")
-            desired_pop_size = 1000 if gen > 1 else INITIAL_POPULATION
+            desired_pop_size = 100 if gen > 1 else INITIAL_POPULATION
             offspring = self.toolbox.select(pop, desired_pop_size)
             offspring = list(map(self.toolbox.clone, offspring))
             for child1, child2 in zip(offspring[::2], offspring[1::2]):

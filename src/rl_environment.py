@@ -169,9 +169,9 @@ class TradingEnvironment:
                                 self.buy_fee_per_share = buy_fee_per_share
                             self.inventory = self.inventory + qty if self.inventory > 0 else qty
                             self.cash -= total_cost
-                            logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Buy, Spent={total_cost:.2f}, "
-                                        f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, Buy Fee/Share={self.buy_fee_per_share:.6f}, "
-                                        f"New Cash={self.cash:.2f}")
+                            # logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Buy, Spent={total_cost:.2f}, "
+                            #             f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, Buy Fee/Share={self.buy_fee_per_share:.6f}, "
+                            #             f"New Cash={self.cash:.2f}")
 
             elif action == 2:  # Sell (long)
                 if self.inventory <= 0:
@@ -187,9 +187,9 @@ class TradingEnvironment:
                     self.inventory = 0.0
                     self.entry_price = 0.0
                     self.buy_fee_per_share = 0.0
-                    logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Sell, Proceeds={proceeds:.2f}, "
-                                f"Fee={transaction_fee:.2f}, Net Proceeds={proceeds_after_fee:.2f}, "
-                                f"Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
+                    # logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Sell, Proceeds={proceeds:.2f}, "
+                    #             f"Fee={transaction_fee:.2f}, Net Proceeds={proceeds_after_fee:.2f}, "
+                    #             f"Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
 
         elif self.mode == "short":
             if action == 1:  # Sell (open short)
@@ -222,9 +222,9 @@ class TradingEnvironment:
                             self.buy_fee_per_share = transaction_fee / qty
                             self.inventory = -qty  # Negative inventory for short
                         self.cash += proceeds  # Receive proceeds from short sale
-                        logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Short Sell, Proceeds={proceeds:.2f}, "
-                                    f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, Short Fee/Share={self.buy_fee_per_share:.6f}, "
-                                    f"New Cash={self.cash:.2f}")
+                        # logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Short Sell, Proceeds={proceeds:.2f}, "
+                        #             f"Qty={qty:.6f}, Fee={transaction_fee:.2f}, Short Fee/Share={self.buy_fee_per_share:.6f}, "
+                        #             f"New Cash={self.cash:.2f}")
 
             elif action == 2:  # Buy (close short)
                 if self.inventory >= 0:
@@ -241,8 +241,8 @@ class TradingEnvironment:
                     self.inventory = 0.0
                     self.entry_price = 0.0
                     self.buy_fee_per_share = 0.0
-                    logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Buy to Cover, Cost={total_cost:.2f}, "
-                                f"Fee={transaction_fee:.2f}, Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
+                    # logger.debug(f"[{current_timestamp}] Step {self.current_step}: Action=Buy to Cover, Cost={total_cost:.2f}, "
+                    #             f"Fee={transaction_fee:.2f}, Gain/Loss={realized_gain_loss:.2f}, New Cash={self.cash:.2f}")
 
         # Rest of the code remains largely the same
         next_step = self.current_step + 1
@@ -295,12 +295,12 @@ class TradingEnvironment:
                 bonus = min(np.exp(realized_gain_loss / scale) - 1, 1000.0) * 100
                 reward += bonus
                 is_sell = 1
-                logger.debug(f"[{current_timestamp}] ---PROFITABLE TRADE--- Gain={realized_gain_loss:.2f}, Bonus={bonus:.2f}")
+                # logger.debug(f"[{current_timestamp}] ---PROFITABLE TRADE--- Gain={realized_gain_loss:.2f}, Bonus={bonus:.2f}")
             elif realized_gain_loss < 0:
                 penalty = realized_gain_loss * 1.5
                 reward += penalty
                 is_sell = -1
-                logger.debug(f"[{current_timestamp}] Unprofitable trade. Gain={realized_gain_loss:.2f}, Penalty={penalty:.2f}")
+                # logger.debug(f"[{current_timestamp}] Unprofitable trade. Gain={realized_gain_loss:.2f}, Penalty={penalty:.2f}")
 
         # Balance stop condition
         balance_threshold = 0.5 * self.initial_capital
@@ -310,8 +310,8 @@ class TradingEnvironment:
             penalty_factor = remaining_steps / total_steps
             reward *= (1 + penalty_factor)
             done = True
-            logger.info(f"[{current_timestamp}] Stopped at Step {next_step}: Balance {portfolio_after:.2f} < {balance_threshold:.2f}, "
-                        f"Adjusted reward: {reward:.2f} (factor: {penalty_factor:.2f})")
+            # logger.info(f"[{current_timestamp}] Stopped at Step {next_step}: Balance {portfolio_after:.2f} < {balance_threshold:.2f}, "
+            #             f"Adjusted reward: {reward:.2f} (factor: {penalty_factor:.2f})")
 
         if done and next_step >= self.n_steps:
             net_profit = portfolio_after - self.initial_capital
@@ -329,8 +329,8 @@ class TradingEnvironment:
             else:
                 next_state = next_state_numpy
         self.current_step = next_step
-        if self.current_step % 1000 == 0:
-            logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")
+        # if self.current_step % 1000 == 0:
+        #     logger.info(f"[{current_timestamp}] Step: {self.current_step} - Balance: {portfolio_after:.2f} - Done: {done}")
 
         self.portfolio_history.append(portfolio_after)
 
