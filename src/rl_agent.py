@@ -10,6 +10,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from collections import deque
+import logging
+import sys
+import os
 
 try:
     import cupy as cp
@@ -18,6 +21,27 @@ except ImportError:
     HAS_CUPY = False
     cp = None
 
+
+# Set up logging
+# logger = logging.getLogger('GeneticOptimizer')
+# logger.setLevel(logging.DEBUG)
+# console_handler = logging.StreamHandler(sys.stdout)
+# console_handler.setLevel(logging.INFO)
+# formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+# console_handler.setFormatter(formatter)
+# logger.addHandler(console_handler)
+# pipe_path = '/tmp/genetic_optimizer_logpipe'
+# if not os.path.exists(pipe_path):
+#     os.mkfifo(pipe_path)
+# try:
+#     pipe = open(pipe_path, 'w')
+#     pipe_handler = logging.StreamHandler(pipe)
+#     pipe_handler.setLevel(logging.DEBUG)
+#     pipe_handler.setFormatter(formatter)
+#     logger.addHandler(pipe_handler)
+# except Exception as e:
+#     logger.error(f"Failed to open named pipe {pipe_path}: {e}")
+#
 
 # ---------------------------
 # Hybrid Q-Network: CNN -> TCN -> GRU -> Fully Connected Layer
@@ -42,12 +66,24 @@ class HybridQNetwork(nn.Module):
         super(HybridQNetwork, self).__init__()
         self.state_dim = state_dim
         self.seq_length = seq_length
+        # CNN layer
         self.cnn = nn.Conv1d(state_dim, cnn_channels, kernel_size=3, padding=1)
-        tcn_layers = [nn.Conv1d(cnn_channels, tcn_channels, kernel_size=3, padding=2, dilation=2),
-                      nn.ReLU()]
+        # Multi-layer TCN
+        tcn_layers = []
+        for i in range(num_tcn_layers):
+            dilation = 2 ** i  # Dilations: 1, 2, 4
+            padding = (3 - 1) * dilation // 2
+            in_channels = cnn_channels if i == 0 else tcn_channels
+            tcn_layers.append(nn.Conv1d(in_channels, tcn_channels, kernel_size=3,
+                                      padding=padding, dilation=dilation))
+            tcn_layers.append(nn.ReLU())
         self.tcn = nn.Sequential(*tcn_layers)
-        self.gru = nn.GRU(tcn_channels, gru_hidden_size, num_layers=num_gru_layers, batch_first=True)
+        # GRU layer
+        self.gru = nn.GRU(tcn_channels, gru_hidden_size, num_layers=num_gru_layers,
+                         batch_first=True)
+        # Output layer
         self.fc = nn.Linear(gru_hidden_size, action_dim)
+        # Forward pass remains similar but operates on updated dimensions
 
     def forward(self, x, hidden_state=None, env=None):
         """
@@ -64,6 +100,8 @@ class HybridQNetwork(nn.Module):
         # The extra features appended by the environment are:
         # [norm_adjusted_buy, norm_adjusted_sell, inventory, cash_ratio, norm_entry_diff]
         # We assume that the "inventory" (a proxy for whether entry_price is set) is at index: state_dim - 3.
+        x = x.float()
+
         if x.dim() == 2:
             x = x.unsqueeze(0)
         last_state = x[:, -1, :]  # (batch_size, state_dim)
@@ -107,8 +145,8 @@ class HybridQNetwork(nn.Module):
 # ---------------------------
 class DQNAgent:
     def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99,
-                 epsilon=1.0, epsilon_decay=0.999, epsilon_min=0.01,
-                 seq_length=720, buffer_capacity=5000, use_cudf=False):
+                 epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01,
+                 seq_length=120, buffer_capacity=100000, use_cudf=False):
         """
         DQN Agent that uses the HybridQNetwork (CNN -> TCN -> GRU -> FC) for Q-learning.
 
@@ -138,13 +176,22 @@ class DQNAgent:
         self.device = torch.device(device)
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.lr = lr
         self.gamma = gamma
         self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
-        self.epsilon_decay = epsilon_decay  # Slower decay
-        self.seq_length = seq_length  # Reduced to 720
-        self.q_net = HybridQNetwork(state_dim, action_dim, seq_length=seq_length).to(self.device)
-        self.target_net = HybridQNetwork(state_dim, action_dim, seq_length=seq_length).to(self.device)
+        self.seq_length = seq_length
+        self.buffer = deque(maxlen=buffer_capacity)
+        self.update_target_every = 1000
+        # Initialize q_net and target_net with updated HybridQNetwork
+        self.q_net = HybridQNetwork(state_dim, action_dim)
+        self.target_net = HybridQNetwork(state_dim, action_dim)
+
+        self.q_net.to(self.device)  # Add this line
+        self.target_net.to(self.device)  # Add this line
+
+        self.target_net.load_state_dict(self.q_net.state_dict())
         self.env = None
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.scaler = torch.amp.GradScaler() if self.device.type == "cuda" else None
@@ -237,16 +284,9 @@ class DQNAgent:
         if len(self.buffer) > 10000:
             self.buffer.pop(0)
 
-
     def update_policy_from_batch(self, batch):
         """
         Update the Q-network using a given mini-batch of transitions.
-
-        Each transition is a tuple: (state, action, reward, next_state, done).
-        This method ensures that each state is processed to have the required history
-        (i.e. shape: (seq_length, state_dim)) and then performs a gradient descent step
-        to minimize the TD error. Mixed precision training and gradient clipping are used
-        if available.
 
         Parameters:
             batch (list): A list of transitions, each a tuple:
@@ -256,46 +296,37 @@ class DQNAgent:
         processed_states = [self._ensure_history(s) for s in states]
         processed_next_states = [self._ensure_history(s) for s in next_states]
 
-        # Ensure all processed states are NumPy arrays
+        # Convert CuPy to NumPy if necessary
         processed_states_np = [cp.asnumpy(s) if isinstance(s, cp.ndarray) else s for s in processed_states]
         processed_next_states_np = [cp.asnumpy(s) if isinstance(s, cp.ndarray) else s for s in processed_next_states]
 
-        # Stack as NumPy arrays
-        states_numpy = np.stack(processed_states_np, axis=0)
-        next_states_numpy = np.stack(processed_next_states_np, axis=0)
-
-        # Convert to PyTorch tensors
-        states = torch.from_numpy(states_numpy).float().to(self.device)
-        next_states = torch.from_numpy(next_states_numpy).float().to(self.device)
-
+        # Stack and convert to tensors
+        states = torch.from_numpy(np.stack(processed_states_np)).float().to(self.device)
+        next_states = torch.from_numpy(np.stack(processed_next_states_np)).float().to(self.device)
         actions = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
         rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(1)
         dones = torch.tensor(dones, dtype=torch.float, device=self.device).unsqueeze(1)
 
         self.optimizer.zero_grad()
-        if self.scaler:
-            with torch.amp.autocast(device_type=self.device.type):
-                q_values, _ = self.q_net(states, env=self.env)
-                q_values = q_values.gather(1, actions)
-                with torch.no_grad():
-                    max_next_q, _ = self.target_net(next_states, env=self.env)
-                    target = rewards + self.gamma * max_next_q.max(1)[0].unsqueeze(1) * (1 - dones)
-                loss = nn.functional.mse_loss(q_values, target)
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-        else:
-            q_values, _ = self.q_net(states, env=self.env)
-            q_values = q_values.gather(1, actions)
-            with torch.no_grad():
-                max_next_q, _ = self.target_net(next_states, env=self.env)
-                target = rewards + self.gamma * max_next_q.max(1)[0].unsqueeze(1) * (1 - dones)
-            loss = nn.functional.mse_loss(q_values, target)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
-            self.optimizer.step()
+
+        # Compute Q-values for current states
+        q_values, _ = self.q_net(states, hidden_state=None, env=self.env)
+        q_values = q_values.gather(1, actions)
+
+        with torch.no_grad():
+            # Compute Q-values for next states using q_net
+            q_values_next, _ = self.q_net(next_states, hidden_state=None, env=self.env)
+            next_actions = q_values_next.argmax(dim=1, keepdim=True)  # Shape: [32, 1], values in {0, 1, 2}
+
+            # Compute target Q-values
+            target_q_values, _ = self.target_net(next_states, hidden_state=None, env=self.env)
+            max_next_q = target_q_values.gather(1, next_actions)
+            target = rewards + self.gamma * max_next_q * (1 - dones)
+
+        loss = nn.functional.mse_loss(q_values, target)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
+        self.optimizer.step()
 
         self.step_count += 1
         if self.step_count % self.update_target_every == 0:

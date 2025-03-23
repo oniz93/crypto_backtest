@@ -105,7 +105,7 @@ class GeneticOptimizer:
         """
         return {
             'vwap': {'offset': (0, 50)},
-            'vwma': {'length': (5, 200)},
+            # 'vwma': {'length': (5, 200)},
             'vpvr': {
                 # Note: The keys here should match the entries in self.timeframes.
                 # When using pandas, self.timeframes uses 1T/1D etc.
@@ -120,11 +120,12 @@ class GeneticOptimizer:
             'rsi': {'length': (5, 30)},
             'macd': {'fast': (5, 20), 'slow': (21, 50), 'signal': (5, 20)},
             'bbands': {'length': (10, 50), 'std_dev': (1.0, 3.0)},
-            'stoch': {'k': (5, 20), 'd': (3, 10)},
+            # 'stoch': {'k': (5, 20), 'd': (3, 10)},
             'atr': {'length': (5, 30)},
-            'roc': {'length': (5, 30)},
-            'hist_vol': {'length': (5, 50)},
-            'obv': {}
+            'adx': {'length': (5, 200)},
+            # 'roc': {'length': (5, 30)},
+            # 'hist_vol': {'length': (5, 50)},
+            # 'obv': {}
         }
 
     def create_parameter_indices(self):
@@ -432,10 +433,7 @@ class GeneticOptimizer:
                     penalty_factor = (chunk_len - step_count) / chunk_len
                     chunk_reward *= (1 + penalty_factor)
                 ep_reward += chunk_reward
-                logger.info(f"Episode {ep + 1}, chunk {i + 1} completed. Chunk reward: {chunk_reward:.2f}")
-                logger.info(f"Chunk {i + 1} took {time.time() - chunk_start_time:.2f}s")
-                logger.info(f"Num profit sell {profit_sells} -> {profit_total:.2f}")
-                logger.info(f"Num loss sell {loss_sells} -> {loss_total:.2f}")
+                logger.info(f"Chunk {i + 1} took {time.time() - chunk_start_time:.2f}s reward: {chunk_reward:.2f} | N+sell {profit_sells} -> {profit_total:.2f} | N-sell {loss_sells} -> {loss_total:.2f}")
             total_reward_sum += ep_reward
             episode_count += 1
             logger.info(f"Episode {ep + 1} completed. Total episode reward: {ep_reward:.2f}")
