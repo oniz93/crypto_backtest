@@ -72,7 +72,8 @@ def local_evaluate_individual(args):
     Evaluate a single individual locally using multiprocessing.
     """
     optimizer, individual, gpuId, generation = args
-    return optimizer.evaluate_individual(individual, gpuId=gpuId, generation=generation)
+    asd = optimizer.evaluate_individual(individual, gpuId=gpuId, generation=generation)
+    return asd
 
 class GeneticOptimizer:
     def __init__(self, data_loader: DataLoader, session_id=None, gen=None,
@@ -81,6 +82,7 @@ class GeneticOptimizer:
         """
         Initialize the GeneticOptimizer.
         """
+        self.features_df = None
         self.data_loader = data_loader
         self.df_strategy = get_dataframe_strategy()
         self.indicators_dir = indicators_dir
@@ -213,6 +215,8 @@ class GeneticOptimizer:
         Evaluate an individual by computing indicator features, filtering data,
         and running RL training.
         """
+        import gc
+        import torch
         if gpuId != None:
             cuda.select_device(gpuId)
         config = self.extract_config_from_individual(individual)
@@ -221,37 +225,55 @@ class GeneticOptimizer:
             features_file = f"features/{hash_str}.parquet"
             if os.path.exists(features_file):
                 logger.info("Loading precomputed indicator features from file...")
-                features_df = self.df_strategy.load_parquet(features_file)  # Always pandas for saved files
+                self.features_df = self.df_strategy.load_parquet(features_file)  # Always pandas for saved files
             else:
                 logger.info("Computing indicator features for individual (local mode)...")
-                features_df = self.load_and_prepare_features(config)
-                features_df.to_parquet(features_file)
+                self.load_and_prepare_features(config)
+                self.features_df.to_parquet(features_file)
         else:
             logger.info("Computing indicator features for individual...")
-            features_df = self.load_and_prepare_features(config)
+            self.load_and_prepare_features(config)
 
-        features_df = self.data_loader.filter_data_by_date(
-            features_df,
+        self.features_df = self.data_loader.filter_data_by_date(
+            self.features_df,
             self.config.get('start_simulation'),
             self.config.get('end_simulation')
         )
 
-        if len(features_df) < 100:
+        if len(self.features_df) < 100:
             logger.warning("Not enough data to run RL.")
+            if USING_CUDF: # CRUCIAL: Force cleanup.
+                del self.features_df
+                gc.collect()
+                cuda.current_context().deallocations.clear() # Free all the CUDF
             return (9999999.0,), 0.0, None
 
-        if 'close' not in features_df.columns:
+        if 'close' not in self.features_df.columns:
             logger.error("'close' column missing in features_df.")
+            if USING_CUDF: # CRUCIAL: Force cleanup.
+                del self.features_df
+                gc.collect()
+                cuda.current_context().deallocations.clear() # Free all the CUDF
             return (9999999.0,), 0.0, None
 
-        price_data = features_df[['close']]
-        indicators_only = features_df.drop(columns=['close'], errors='ignore')
-        del features_df
+        price_data = self.features_df[['close']]
+        indicators_only = self.features_df.drop(columns=['close'], errors='ignore')
+        del self.features_df
+        gc.collect()
         env = self.create_environment(price_data, indicators_only)
         del indicators_only
+        del price_data
+        gc.collect()
         logger.info("Starting RL training for individual...")
         agent, avg_profit = self.run_rl_training(env, episodes=self.config.get('episodes', 20), generation=generation)
         del env
+
+        if USING_CUDF:
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+            torch.cuda.empty_cache()
+
+        gc.collect()
         return (-avg_profit,), avg_profit, agent
 
     def extract_config_from_individual(self, individual):
@@ -324,11 +346,13 @@ class GeneticOptimizer:
         # logger.info(f"Initialized features_df as {type(self.features_df)}")
 
         for task in tasks:
-                indicator_name, timeframe, indicator_df = self._calculate_indicator_worker(task)
-                # logger.info(f"Received result for {indicator_name} on TF {timeframe}")
+            indicator_name, timeframe, indicator_df = self._calculate_indicator_worker(task)
+            # logger.info(f"Received result for {indicator_name} on TF {timeframe}")
 
-                indicator_df.columns = [col.replace('\n', '').strip() for col in indicator_df.columns]
-                self.features_df = self.features_df.join(indicator_df)
+            indicator_df.columns = [col.replace('\n', '').strip() for col in indicator_df.columns]
+            self.features_df = self.features_df.join(indicator_df)
+            del indicator_df
+            gc.collect()
 
         # Compute RSI Divergence (example, adjust column names as needed)
         # Assuming indicators append timeframe to column names, e.g., 'rsi_1min', 'rsi_5min'
@@ -352,7 +376,7 @@ class GeneticOptimizer:
             self.features_df, self.config.get('start_simulation'), self.config.get('end_simulation')
         )
         # logger.info(f"Final features_df type: {type(self.features_df)}")
-        return self.features_df
+        return True
 
     def create_environment(self, price_data, indicators):
         """
@@ -370,6 +394,9 @@ class GeneticOptimizer:
         Run reinforcement learning training on the trading environment using dataset-level chunking.
         """
         from src.rl_agent import DQNAgent
+        import gc
+        import torch
+
         seq_length = self.config.get('seq_length', 720)
         chunk_size = self.config.get('chunk_size', 4000)
         batch_frequency = 32
@@ -389,10 +416,10 @@ class GeneticOptimizer:
             ep_reward = 0.0
 
             for i, indices in enumerate(chunk_indices):
-                chunk_len = len(indices)
-                logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{num_chunks} (size {chunk_len} rows) | Max chunks: {generation}")
                 if generation is not None and i >= generation:
                     break
+                chunk_len = len(indices)
+                logger.info(f"Episode {ep + 1}: Processing chunk {i + 1}/{num_chunks} (size {chunk_len} rows) | Max chunks: {generation}")
                 env.data_values = full_data_np[indices]
                 env.n_steps = len(indices)
                 if USING_CUDF:
@@ -446,6 +473,12 @@ class GeneticOptimizer:
         del env.data_values
         del env.data
         del agent.env
+
+        if USING_CUDF:
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+            torch.cuda.empty_cache()
+
         gc.collect()
         return agent, total_reward_sum
 

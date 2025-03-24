@@ -151,9 +151,9 @@ def incremental_vpvr_fixed_bins(df: pd.DataFrame,
 
 
 def incremental_vpvr_fixed_bins_gpu(df: cudf.DataFrame,
-                                     width: int = 100,
-                                     n_rows: int = None,
-                                     bins_array: np.ndarray = None) -> cudf.DataFrame:
+                                    width: int = 100,
+                                    n_rows: int = None,
+                                    bins_array: np.ndarray = None) -> cudf.DataFrame:
     """
     A one-pass algorithm to compute incremental volume-by-price for cuDF data.
 
@@ -191,19 +191,21 @@ def incremental_vpvr_fixed_bins_gpu(df: cudf.DataFrame,
             bin_indices = cp.zeros(n, dtype=cp.int64)
         else:
             # Create bins based on min and max prices
-            bins_array = np.linspace(min_price, max_price, width + 1)
-            bins_series = cudf.Series(bins_array)
-            bin_indices = (bins_series.searchsorted(closes, side='right') - 1).clip(0, width - 1)
+            bins_array = cp.linspace(min_price, max_price, width + 1)  # Use cupy
+            # bins_series = cudf.Series(bins_array) # No need for this conversion
+            bin_indices = (cp.searchsorted(bins_array, closes.to_cupy(), side='right') - 1).clip(0,
+                                                                                                 width - 1)  # Use cupy
     else:
         # Use provided bins_array and adjust width
         width = len(bins_array) - 1
-        bins_series = cudf.Series(bins_array)
-        bin_indices = (bins_series.searchsorted(closes, side='right') - 1).clip(0, width - 1)
+        bins_array = cp.asarray(bins_array)  # Make sure it's cupy
+        # bins_series = cudf.Series(bins_array) # No need for this conversion
+        bin_indices = (cp.searchsorted(bins_array, closes.to_cupy(), side='right') - 1).clip(0, width - 1)  # cupy
 
     # Initialize output array and populate with volumes
     out = cp.zeros((n, width), dtype=cp.float64)
     rows = cp.arange(n)
-    out[rows, bin_indices] = volumes.values
+    out[rows, bin_indices] = volumes.to_cupy()  # Convert to cupy
 
     # Compute cumulative sum along rows
     cumulative_dist = cp.cumsum(out, axis=0)
@@ -1004,7 +1006,7 @@ class CuDFStrategy(BaseStrategy):
         width = int(params['width'])
         n_clusters = 100
         cluster_columns = [f'cluster_{i}' for i in range(n_clusters)]
-        data = data.copy()
+        # data = data.copy() # No need
         if data['close'].isnull().any():
             data.dropna(subset=['close'], inplace=True)
 
@@ -1015,18 +1017,19 @@ class CuDFStrategy(BaseStrategy):
             volume_profile_df[col] = normalize_volume_vec(volume_profile_df[col].values)
 
         # Rejoin with original data if you want (like old code):
-        data = data.reset_index(drop=False)
-        new_clusters = volume_profile_df.reset_index(drop=False)
+        # data = data.reset_index(drop=False) # No need
+        volume_profile_df = volume_profile_df.reset_index(drop=False)  # Reset the index
 
         # Change this line:
-        data = data.drop(columns=cluster_columns, errors='ignore').merge(
-            new_clusters, on='timestamp', suffixes=('_left', '_right')
-        )
-        data = data.set_index('timestamp')
+        # data = data.drop(columns=cluster_columns, errors='ignore').merge( # No need
+        #     new_clusters, on='timestamp', suffixes=('_left', '_right')
+        # )
+        # data = data.set_index('timestamp') # No need
 
-        for col in cluster_columns:
-            data[col] = normalize_volume_vec(data[col])
-        return data[cluster_columns].dropna()
+        # for col in cluster_columns: # No need
+        #     data[col] = normalize_volume_vec(data[col])
+        # return data[cluster_columns].dropna() # No need
+        return volume_profile_df.set_index('timestamp')[cluster_columns].dropna()  # Just return this
 
 
 def get_dataframe_strategy():
