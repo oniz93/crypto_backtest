@@ -542,9 +542,10 @@ class GeneticOptimizer:
 
         os.makedirs(f"population/{self.session_id}", exist_ok=True)
         os.makedirs(f"weights/{self.session_id}", exist_ok=True)
-
+        cur_gen = 1
         if self.gen is not None:
             pop = self.load_population(self.session_id, self.gen)
+            cur_gen = self.gen
             if not pop:
                 pop = self.toolbox.population(n=INITIAL_POPULATION)
         else:
@@ -557,7 +558,7 @@ class GeneticOptimizer:
         #     ind.avg_profit = avg_profit
         #     ind.agent = agent
 
-        for gen in range(1, NGEN + 1):
+        for gen in range(cur_gen, NGEN + 1):
             logger.info(f"=== Generation {gen} ===")
             desired_pop_size = 100 if gen > 1 else INITIAL_POPULATION
             offspring = self.toolbox.select(pop, desired_pop_size)
